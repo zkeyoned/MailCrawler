@@ -214,7 +214,7 @@ def search_window(auto=False):
     if before:
         # IMAP BEFORE 是「早于当天」，含当天要 +1
         args += ["BEFORE", _imap_date((datetime.strptime(before, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d"))]
-    return args
+    return args or ["ALL"]          # 没设范围时必须给 ALL：空的 UID SEARCH 会被腾讯邮箱回 BAD
 
 
 def _fetch_chunk(args_desc, chunk):
