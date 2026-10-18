@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>邮件爬虫</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ================= 登录页（未登录时显示） ================= -->
+<section id="login" hidden>
+  <div class="lcard">
+    <div class="lbrand"><span class="logo">🕷</span><b>邮件爬虫</b><span class="ltag">开源 · 本地运行</span></div>
+    <p class="lhint">连接你的学校邮箱（腾讯企业邮箱 IMAP，只读同步），用 AI 把邮件分成七类、找出截止日期。</p>
+
+    <label class="lfld">
+      <span>学号（可选，仅用于猜测邮箱地址，可改）</span>
+      <input id="lg-sid" type="text" inputmode="numeric" autocomplete="off" placeholder="10 位学号">
+    </label>
+    <label class="lfld">
+      <span>学校邮箱（完整地址，必填）</span>
+      <input id="lg-email" type="email" autocomplete="username" placeholder="name@mail.example.edu.cn">
+    </label>
+    <label class="lfld">
+      <span>邮箱密码</span>
+      <input id="lg-pass" type="password" autocomplete="current-password" placeholder="学校邮箱密码">
+    </label>
+    <label class="lfld">
+      <span>TypeSafe API key（Jev 分类用）</span>
+      <input id="lg-key" type="password" autocomplete="off" placeholder="apikey_…">
+      <span class="lsub">在 console.typesafe.ai 注册并充值后创建；key 只存在本机系统钥匙串。</span>
+    </label>
+
+    <details class="lmore-cfg">
+      <summary>同步范围与自动同步（可稍后在设置里改）</summary>
+      <div class="lrange">
+        <label>从 <input id="lg-since" type="date"></label>
+        <label>到 <input id="lg-before" type="date"></label>
+      </div>
+      <span class="lsub">留空 = 不限。首次同步建议限定范围，全量会更慢。</span>
+      <label class="lchk"><input id="lg-auto" type="checkbox"> 新邮件自动同步（默认关闭；开启后按间隔后台增量同步）</label>
+    </details>
+
+    <div id="lg-error" class="lerror" hidden></div>
+    <button id="lg-submit" class="primary big">登录并开始</button>
+
+    <div class="lprivacy">
+      <b>隐私说明</b>
+      <p>邮件正文会发送到 TypeSafe（一家美国公司）的服务器做分类（api.typesafe.ai），分类结果和邮件正文保存在你本机。是否使用由你自己决定；不想用的类别可以在分类后忽略，或随时退出登录删除本地数据。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 主界面 ================= -->
+<aside id="sidebar">
+  <div class="brand"><span class="logo">🕷</span><span class="bname">邮件爬虫</span></div>
+  <button id="btn-crawl" class="primary">＋ 新一轮爬取</button>
+  <button id="btn-search" class="ghost">🔍 搜索</button>
+  <div id="searchbox" hidden><input id="q" type="search" placeholder="搜索主题、发件人、正文…" autocomplete="off"></div>
+
+  <div class="group">视图</div>
+  <div id="nav-views" class="navlist"></div>
+  <div class="group">类别</div>
+  <div id="nav-cats" class="navlist"></div>
+
+  <div class="spacer"></div>
+  <div class="foot">
+    <div class="fline"><span>Jev 估计花费</span><b id="cost">$0.0000</b></div>
+    <div class="fline"><span id="syncline">未同步</span><span id="syncpct"></span></div>
+    <div class="bar"><i id="syncbar"></i></div>
+  </div>
+</aside>
+
+<main id="main">
+  <header id="topbar">
+    <button id="btn-fold" class="icon" title="折叠/展开侧栏">☰</button>
+    <div class="ctrs">
+      <div class="ctr c-crawl"><div class="lbl">CRAWLERS</div><div class="val"><span class="odo" id="o-crawlers"></span></div></div>
+      <div class="ctr c-mail"><div class="lbl">EMAILS</div><div class="val"><span class="odo" id="o-emails"></span><span class="sfx" id="s-emails"></span></div></div>
+      <div class="ctr c-words"><div class="lbl">WORDS READ</div><div class="val"><span class="odo" id="o-words"></span></div></div>
+      <div class="ctr c-jev"><div class="lbl">SENT TO JEV</div><div class="val"><span class="odo" id="o-jev"></span></div></div>
+      <div class="ctr c-exp"><div class="lbl">EXPIRED</div><div class="val"><span class="odo" id="o-exp"></span></div></div>
+    </div>
+    <div class="tools" id="tools">
+      <label class="speed">速度 <input id="speed" type="range" min="0.25" max="5" step="0.05" value="1"><b id="speedv">1.0×</b></label>
+      <div class="seg" id="grids">
+        <button data-n="4">4</button><button data-n="9" class="on">9</button><button data-n="12">12</button><button data-n="20">20</button>
+      </div>
+      <button id="btn-settings" class="icon" title="设置">⚙</button>
+    </div>
+  </header>
+
+  <section id="crawlview">
+    <div id="stage"><canvas id="cv"></canvas></div>
+  </section>
+
+  <section id="listview" hidden>
+    <div class="ltool">
+      <div class="ltitle"><b id="ltitle">全部</b><span id="lcount"></span></div>
+      <div class="lacts" id="lacts" hidden>
+        <label class="chk"><input type="checkbox" id="selall"> 全选</label>
+        <button id="btn-trash" class="danger" disabled>移到已删除</button>
+      </div>
+    </div>
+    <div class="lwrap" id="lwrap">
+      <table id="ltable">
+        <thead><tr id="lhead"></tr></thead>
+        <tbody id="lbody"></tbody>
+      </table>
+      <div id="lmore" class="lmore"></div>
+    </div>
+  </section>
+</main>
+
+<aside id="drawer" aria-hidden="true">
+  <div class="dtop"><b>邮件全文</b><button id="drawer-close" class="icon">✕</button></div>
+  <div class="dscroll"><div id="dcontent"></div></div>
+</aside>
+
+<!-- ================= 设置弹窗 ================= -->
+<div id="settings-mask" hidden>
+  <div class="modal wide">
+    <div class="dtop"><b>设置</b><button id="st-close" class="icon">✕</button></div>
+    <div class="sbody">
+      <div class="ssec">
+        <div class="ssec-t">账号</div>
+        <div class="srow"><span>当前邮箱</span><b id="st-email"></b></div>
+        <div class="srow"><button id="st-logout" class="danger">退出登录并删除本地数据</button></div>
+        <div class="lsub">退出会清除系统钥匙串里的密码和 key，并删除本机保存的邮件数据库。</div>
+      </div>
+      <div class="ssec">
+        <div class="ssec-t">同步范围（IMAP SINCE / BEFORE，只读）</div>
+        <div class="srow">
+          <label>从 <input id="st-since" type="date"></label>
+          <label>到 <input id="st-before" type="date"></label>
+        </div>
+        <div class="lsub">留空 = 不限。修改后点「新一轮爬取」生效；范围内新邮件才会被同步。</div>
+      </div>
+      <div class="ssec">
+        <div class="ssec-t">新邮件自动同步</div>
+        <div class="srow">
+          <label class="lchk"><input id="st-auto" type="checkbox"> 开启自动同步</label>
+          <label>每 <input id="st-min" type="number" min="5" max="1440" step="5"> 分钟增量同步一次</label>
+        </div>
+        <div class="lsub">自动同步只扫描最近 7 天，不会标已读。默认关闭。</div>
+      </div>
+      <div class="ssec">
+        <div class="ssec-t">隐私</div>
+        <div class="lsub">邮件正文会发送到 TypeSafe（美国公司）的服务器做分类；密码与 API key 只存在本机系统钥匙串。</div>
+      </div>
+      <div id="st-error" class="lerror" hidden></div>
+      <div class="mbtns"><button id="st-save" class="primary btn-pad">保存</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="drawer-mask" hidden></div>
+<div id="modal-mask" hidden>
+  <div class="modal">
+    <div id="modal-text"></div>
+    <div class="mbtns"><button id="m-cancel" class="ghost">取消</button><button id="m-ok" class="danger">确认移动</button></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
