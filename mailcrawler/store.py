@@ -2,7 +2,7 @@
 """SQLite 存储层：邮件、分类结果、计数元数据。"""
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import ddl, paths
@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS triage(
     uid INTEGER PRIMARY KEY, cat TEXT, cat_conf REAL, action REAL,
     deadline TEXT, deadline_text TEXT, ddl_status TEXT, classified_at TEXT,
     ddl_conf REAL, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-    importance REAL, imp_conf REAL, ignored INTEGER DEFAULT 0);
+    importance REAL, imp_conf REAL, ignored INTEGER DEFAULT 0,
+    event_start TEXT, event_end TEXT, event_text TEXT, event_place TEXT, event_conf REAL);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date);
 """
@@ -31,7 +32,9 @@ def db():
 
 
 # 老版本建的库没有这几列：打开时补上（importance 为 NULL 的老记录会被当成「还没打重要程度」重新送去判断）
-MIGRATE_TRIAGE = (("importance", "REAL"), ("imp_conf", "REAL"), ("ignored", "INTEGER DEFAULT 0"))
+MIGRATE_TRIAGE = (("importance", "REAL"), ("imp_conf", "REAL"), ("ignored", "INTEGER DEFAULT 0"),
+                  ("event_start", "TEXT"), ("event_end", "TEXT"), ("event_text", "TEXT"), ("event_place", "TEXT"),
+                  ("event_conf", "REAL"))
 
 
 def init_db():
@@ -122,39 +125,84 @@ def triage_row(uid):
     return dict(r) if r else None
 
 
-def triage_public(r):
-    """给前端的 triage 字段；ddl_status 按「现在」重新算，避免缓存里的状态过期。"""
+def time_fields(r, now=None):
+    """一行 triage（dict）里和时间相关的字段 + 现在的状态。
+    活动 ev_status：upcoming/ongoing/ended/none；截止 ddl_status：open/expired/none。
+    finished：该邮件所有已识别的时间点都过去了（有截止没过 / 有活动没结束 都算还没完）。"""
+    now = now or datetime.now()
     dl = r.get("deadline") or ""
-    st = ddl.status_of(parse_dt(dl)) if dl else "none"
-    return {"uid": r["uid"], "cat": r["cat"], "cat_zh": CAT_ZH.get(r["cat"], r["cat"]), "cat_conf": r["cat_conf"],
-            "action": r["action"], "deadline": dl, "deadline_text": r.get("deadline_text") or "", "ddl_status": st,
-            "classified_at": r.get("classified_at"), "importance": r.get("importance"), "stars": stars_of(r.get("importance")),
-            "imp_conf": r.get("imp_conf"), "ignored": bool(r.get("ignored"))}
+    es = r.get("event_start") or ""
+    ee = r.get("event_end") or ""
+    ddl_status = ddl.status_of(parse_dt(dl), now) if dl else "none"
+    ev_status = ddl.event_status(parse_dt(es), parse_dt(ee), now) if es else "none"
+    open_any = ddl_status == "open" or ev_status in ("upcoming", "ongoing")
+    return {"deadline": dl, "deadline_text": r.get("deadline_text") or "", "ddl_status": ddl_status,
+            "event_start": es, "event_end": ee, "event_text": r.get("event_text") or "",
+            "event_place": r.get("event_place") or "", "ev_status": ev_status,
+            "finished": (ddl_status != "none" or ev_status != "none") and not open_any}
+
+
+def triage_public(r):
+    """给前端的 triage 字段；各种状态按「现在」重新算，避免缓存里的状态过期。"""
+    out = {"uid": r["uid"], "cat": r["cat"], "cat_zh": CAT_ZH.get(r["cat"], r["cat"]), "cat_conf": r["cat_conf"],
+           "action": r["action"], "classified_at": r.get("classified_at"), "importance": r.get("importance"),
+           "stars": stars_of(r.get("importance")), "imp_conf": r.get("imp_conf"), "ignored": bool(r.get("ignored"))}
+    out.update(time_fields(r))
+    return out
 
 
 def save_triage(uid, cat, cat_conf, action, deadline, deadline_text, ddl_conf, usage,
-                importance=None, imp_conf=None, ignored=False):
+                importance=None, imp_conf=None, ignored=False,
+                event_start="", event_end="", event_text="", event_place="", event_conf=0.0):
     status = ddl.status_of(parse_dt(deadline)) if deadline else "none"
     with DB_LOCK, db() as c:
         c.execute("""INSERT OR REPLACE INTO triage(uid,cat,cat_conf,action,deadline,deadline_text,ddl_status,
-                     classified_at,ddl_conf,input_tokens,output_tokens,importance,imp_conf,ignored)
-                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     classified_at,ddl_conf,input_tokens,output_tokens,importance,imp_conf,ignored,
+                     event_start,event_end,event_text,event_place,event_conf)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (uid, cat, cat_conf, action, deadline, deadline_text, status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                    ddl_conf, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0),
-                   importance, imp_conf, 1 if ignored else 0))
+                   importance, imp_conf, 1 if ignored else 0,
+                   event_start or "", event_end or "", event_text or "", event_place or "", event_conf))
+
+
+def update_times(uid, deadline, deadline_text, ddl_conf, event_start, event_end, event_text, event_place, event_conf,
+                 usage=None):
+    """只改时间相关字段（回填脚本用）；不动类别/星级。usage 的 token 累加到这封邮件上。"""
+    status = ddl.status_of(parse_dt(deadline)) if deadline else "none"
+    usage = usage or {}
+    with DB_LOCK, db() as c:
+        c.execute("""UPDATE triage SET deadline=?,deadline_text=?,ddl_status=?,ddl_conf=?,
+                     event_start=?,event_end=?,event_text=?,event_place=?,event_conf=?,
+                     input_tokens=COALESCE(input_tokens,0)+?, output_tokens=COALESCE(output_tokens,0)+? WHERE uid=?""",
+                  (deadline or "", deadline_text or "", status, ddl_conf, event_start or "", event_end or "",
+                   event_text or "", event_place or "", event_conf, int(usage.get("input_tokens") or 0),
+                   int(usage.get("output_tokens") or 0), uid))
 
 
 # ------------------------------------------------------------------ 查询
+EV_END_SQL = "COALESCE(NULLIF(t.event_end,''), strftime('%Y-%m-%d %H:%M', t.event_start, '+1 hour'))"
+
+
+def finished_sql(now):
+    """SQL：这封邮件有时间点，并且全部过去了（截止已过；活动已结束）→ 已过期·可删。
+    有截止没过，或有活动没结束，都还不算。基表别名 t（triage）。返回 (条件, 参数)。"""
+    cond = ("((COALESCE(t.deadline,'')<>'' OR COALESCE(t.event_start,'')<>'')"
+            " AND NOT (COALESCE(t.deadline,'')<>'' AND t.deadline >= ?)"
+            " AND NOT (COALESCE(t.event_start,'')<>'' AND " + EV_END_SQL + " > ?))")
+    return cond, [now, now]
+
+
 def view_where(view, q, now):
     """返回 (WHERE 子句, 参数)。基表为 emails e LEFT JOIN triage t。"""
     w, p = ["e.trashed=0"], []
-    expired = "(COALESCE(t.deadline,'')<>'' AND t.deadline < ?)"
+    fin, fp = finished_sql(now)
     if view == "todo":
-        w.append("t.uid IS NOT NULL AND t.action>=0.6 AND NOT " + expired)
-        p.append(now)
+        w.append("t.uid IS NOT NULL AND t.action>=0.6 AND NOT " + fin)
+        p += fp
     elif view == "expired":
-        w.append(expired)
-        p.append(now)
+        w.append(fin)
+        p += fp
     elif view.startswith("cat:"):
         w.append("t.cat=?")
         p.append(view[4:])
@@ -173,7 +221,8 @@ SORTS = {
 
 def list_emails(view, q, limit, offset, sort="date", min_stars=None, max_stars=None):
     """sort: date | importance；min_stars / max_stars 按四舍五入后的星级筛选（含端点）。"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_dt = datetime.now()
+    now = now_dt.strftime("%Y-%m-%d %H:%M")
     where, p = view_where(view, q, now)
     if min_stars:
         where += " AND t.importance >= ?"
@@ -186,7 +235,8 @@ def list_emails(view, q, limit, offset, sort="date", min_stars=None, max_stars=N
     with DB_LOCK, db() as c:
         total = c.execute("SELECT COUNT(*) " + sql_from, p).fetchone()[0]
         rows = c.execute("SELECT e.uid,e.date,e.sender,e.subject,substr(e.body,1,160) AS snippet,e.seen,"
-                         "t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.ddl_status,t.importance,t.imp_conf,t.ignored "
+                         "t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.ddl_status,t.importance,t.imp_conf,t.ignored,"
+                         "t.event_start,t.event_end,t.event_text,t.event_place "
                          + sql_from + " ORDER BY " + order + " LIMIT ? OFFSET ?", p + [limit, offset]).fetchall()
     items = []
     for r in rows:
@@ -194,10 +244,11 @@ def list_emails(view, q, limit, offset, sort="date", min_stars=None, max_stars=N
         if d["cat"] is None:
             d["classified"] = False
             d["ddl_status"] = None
+            d["ev_status"] = None
         else:
             d["classified"] = True
             d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
-            d["ddl_status"] = ddl.status_of(parse_dt(d["deadline"])) if d["deadline"] else "none"
+            d.update(time_fields(d, now_dt))
         d["stars"] = stars_of(d["importance"])
         d["ignored"] = bool(d["ignored"])
         items.append(d)
@@ -210,42 +261,66 @@ def has_clock_time(deadline):
     return bool(dt) and len(deadline) > 10 and not (dt.hour == 23 and dt.minute == 59)
 
 
+def is_all_day(start, end):
+    """只有日期没有时间的活动，存成 00:00 – 23:59。"""
+    return str(start or "")[11:16] == "00:00" and str(end or "")[11:16] == "23:59"
+
+
 def calendar_items(frm, to, min_stars=None, hide_expired=False, limit=2000):
-    """日历用：截止/活动日期落在 [frm, to]（YYYY-MM-DD，含端点，to 为 None 表示不设上限）的邮件。
-    返回按时间排序的列表；ddl_status 按「现在」重新算。"""
+    """日历用：截止或活动落在 [frm, to]（YYYY-MM-DD，含端点，to 为 None 表示不设上限）的邮件。
+    一封邮件可以产生两条：kind='event'（活动，start/end 是活动起止）和 kind='due'（截止，start 是截止时间）。
+    条目按 start 排序；状态按「现在」重新算；past=这一条已经过去（截止已过 / 活动已结束）。"""
     now = datetime.now()
-    where = ["e.trashed=0", "COALESCE(t.deadline,'')<>''", "substr(t.deadline,1,10)>=?"]
-    p = [frm]
-    if to:
-        where.append("substr(t.deadline,1,10)<=?")
-        p.append(to)
-    sql = ("SELECT e.uid,e.date,e.sender,e.subject,t.cat,t.action,t.deadline,t.deadline_text,t.importance,t.ignored "
-           "FROM emails e JOIN triage t ON e.uid=t.uid WHERE " + " AND ".join(where) +
-           " ORDER BY t.deadline, e.uid LIMIT ?")
+    lim = max(1, min(int(limit), 5000))
+
+    def rng(col):
+        sql, p = "(COALESCE(%s,'')<>'' AND substr(%s,1,10)>=?" % (col, col), [frm]
+        if to:
+            sql += " AND substr(%s,1,10)<=?" % col
+            p.append(to)
+        return sql + ")", p
+    dsql, dp = rng("t.deadline")
+    esql, ep = rng("t.event_start")
+    sql = ("SELECT e.uid,e.date,e.sender,e.subject,t.cat,t.action,t.deadline,t.deadline_text,t.event_start,t.event_end,"
+           "t.event_text,t.event_place,t.importance,t.ignored FROM emails e JOIN triage t ON e.uid=t.uid "
+           "WHERE e.trashed=0 AND (" + dsql + " OR " + esql + ") "
+           "ORDER BY COALESCE(NULLIF(t.event_start,''), t.deadline), e.uid LIMIT ?")
     with DB_LOCK, db() as c:
-        rows = c.execute(sql, p + [max(1, min(int(limit), 5000))]).fetchall()
+        rows = c.execute(sql, dp + ep + [lim]).fetchall()
     out = []
     for r in rows:
-        d = dict(r)
-        dt = parse_dt(d["deadline"])
-        if dt is None:
+        base = dict(r)
+        base["ignored"] = bool(base.get("ignored"))
+        base["stars"] = stars_of(base["importance"])
+        base["cat_zh"] = CAT_ZH.get(base["cat"], base["cat"])
+        tf = time_fields(base, now)
+        base.update(tf)
+        if min_stars and (base["stars"] is None or base["stars"] < min_stars):
             continue
-        d["ddl_status"] = ddl.status_of(dt, now)
-        d["ignored"] = bool(d.get("ignored"))
-        d["stars"] = stars_of(d["importance"])
-        d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
-        d["has_time"] = has_clock_time(d["deadline"])
-        if hide_expired and d["ddl_status"] == "expired":
-            continue
-        if min_stars and (d["stars"] is None or d["stars"] < min_stars):
-            continue
-        out.append(d)
-    return out
+        dl, es = tf["deadline"], tf["event_start"]
+        if dl and frm <= dl[:10] and (not to or dl[:10] <= to):
+            dt = parse_dt(dl)
+            if dt is not None and not (hide_expired and tf["ddl_status"] == "expired"):
+                d = dict(base, kind="due", start=dl, end="", has_time=has_clock_time(dl),
+                         past=tf["ddl_status"] == "expired")
+                out.append(d)
+        if es and frm <= es[:10] and (not to or es[:10] <= to):
+            st, en = parse_dt(es), parse_dt(tf["event_end"])
+            if st is not None and not (hide_expired and tf["ev_status"] == "ended"):
+                allday = is_all_day(es, tf["event_end"])
+                eff = ddl.event_end_eff(st, en)
+                end_time = "24:00" if eff.date() != st.date() else eff.strftime("%H:%M")   # 跨午夜的按当天 24:00 截断
+                d = dict(base, kind="event", start=es, end=tf["event_end"], has_time=not allday, all_day=allday,
+                         end_time=end_time, end_default=not (en and en > st), past=tf["ev_status"] == "ended")
+                out.append(d)
+    out.sort(key=lambda i: (i["start"], i["uid"], i["kind"]))
+    return out[:lim]
 
 
 def get_email_full(uid):
     with DB_LOCK, db() as c:
-        r = c.execute("SELECT e.*, t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.importance,t.imp_conf,t.ignored FROM emails e "
+        r = c.execute("SELECT e.*, t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.importance,t.imp_conf,t.ignored,"
+                      "t.event_start,t.event_end,t.event_text,t.event_place FROM emails e "
                       "LEFT JOIN triage t ON e.uid=t.uid WHERE e.uid=?", (uid,)).fetchone()
     if not r:
         return None
@@ -254,7 +329,7 @@ def get_email_full(uid):
     d["ignored"] = bool(d.get("ignored"))
     if d["cat"] is not None:
         d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
-        d["ddl_status"] = ddl.status_of(parse_dt(d["deadline"])) if d["deadline"] else "none"
+        d.update(time_fields(d))
     return d
 
 
@@ -289,10 +364,11 @@ def stats(cats_keys):
         for r in c.execute("SELECT t.cat,COUNT(*) n FROM emails e JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 GROUP BY t.cat"):
             cats[r["cat"]] = r["n"]
         classified = sum(cats.values())
+        fin, fp = finished_sql(now)
         todo = c.execute("SELECT COUNT(*) FROM emails e JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 AND t.action>=0.6 "
-                         "AND NOT (COALESCE(t.deadline,'')<>'' AND t.deadline<?)", (now,)).fetchone()[0]
-        expired = c.execute("SELECT COUNT(*) FROM emails e JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 "
-                            "AND COALESCE(t.deadline,'')<>'' AND t.deadline<?", (now,)).fetchone()[0]
+                         "AND NOT " + fin, fp).fetchone()[0]
+        expired = c.execute("SELECT COUNT(*) FROM emails e JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 AND " + fin,
+                            fp).fetchone()[0]
         toks = c.execute("SELECT COALESCE(SUM(input_tokens),0) FROM triage").fetchone()[0]
         stars = {k: 0 for k in range(1, 6)}
         for r in c.execute("SELECT t.importance FROM emails e JOIN triage t ON e.uid=t.uid "

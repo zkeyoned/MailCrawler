@@ -70,9 +70,10 @@ def test_ics_build(env):
     assert text.startswith("BEGIN:VCALENDAR\r\n") and text.endswith("END:VCALENDAR\r\n")
     assert text.count("BEGIN:VEVENT") == 4 == text.count("END:VEVENT")
     assert "TZID:Asia/Shanghai" in text
-    assert "SUMMARY:期末考试\\, 地点\\;T6" in text                  # 逗号、分号被转义
+    assert "SUMMARY:截止：期末考试\\, 地点\\;T6" in text              # 逗号、分号被转义；截止条目带「截止：」前缀
     d1 = store.parse_dt(items[0]["deadline"])
     assert "DTSTART;TZID=Asia/Shanghai:" + d1.strftime("%Y%m%dT%H%M%S") in text
+    assert "DTEND;TZID=Asia/Shanghai:" + d1.strftime("%Y%m%dT%H%M%S") in text     # 截止时刻 = 零长度事件
     d2 = store.parse_dt(items[1]["deadline"])
     assert "DTSTART;VALUE=DATE:" + d2.strftime("%Y%m%d") in text      # 全天
     assert "DTEND;VALUE=DATE:" + (d2 + timedelta(days=1)).strftime("%Y%m%d") in text

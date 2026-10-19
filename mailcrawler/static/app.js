@@ -34,6 +34,7 @@
     return s;
   }
   const DDL_ZH = { expired: '已过期', open: '还没过', none: '无截止' };
+  const EV_ZH = { upcoming: '还没开始', ongoing: '进行中', ended: '已结束' };
 
   async function api(path, opt) {
     const r = await fetch(path, opt);
@@ -121,12 +122,30 @@
     if (m && m[1].trim()) return m[1].trim();
     return s.replace(/[<>]/g, '').split('@')[0] || '(未知发件人)';
   }
-  function fmtDdl(dl) {   // '2026-10-16 17:00' -> '10月16日 17:00'
+  function fmtDdl(dl, full) {   // '2026-10-16 17:00' -> '10月16日 17:00'；23:59（邮件里只写了日期）默认不显示，full=true 时照写
     const m = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}))?/.exec(dl || '');
     if (!m) return dl || '';
-    const t = (m[4] && !(m[4] === '23' && m[5] === '59')) ? ' ' + m[4] + ':' + m[5] : '';
+    const t = (m[4] && (full || !(m[4] === '23' && m[5] === '59'))) ? ' ' + m[4] + ':' + m[5] : '';
     return (+m[2]) + '月' + (+m[3]) + '日' + t;
   }
+
+  // 活动时间：'2026-10-19 14:00' + '2026-10-19 15:30' -> '10月19日（周一）14:00–15:30'；全天（00:00–23:59）写「全天」，没有结束时间只写开始
+  function isAllDay(st, en) { return (st || '').slice(11, 16) === '00:00' && (en || '').slice(11, 16) === '23:59'; }
+  function fmtEvent(st, en, withDate) {
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(st || '');
+    if (!m) return st || '';
+    const wd = WEEK_ZH[new Date(+m[1], +m[2] - 1, +m[3]).getDay()];
+    const date = (+m[2]) + '月' + (+m[3]) + '日（周' + wd + '）';
+    let t;
+    if (isAllDay(st, en)) t = '全天';
+    else {
+      t = m[4] + ':' + m[5];
+      if (en && en > st && en.slice(0, 10) === st.slice(0, 10)) t += '–' + en.slice(11, 16);
+    }
+    return (withDate === false ? '' : date) + t;
+  }
+  function evBadge(m) { return m.ev_status && m.ev_status !== 'none' ? el('span', 'badge b-' + m.ev_status, EV_ZH[m.ev_status] || '') : null; }
+  function ddlBadge(m) { return m.ddl_status && m.ddl_status !== 'none' ? el('span', 'badge b-' + m.ddl_status, DDL_ZH[m.ddl_status] || '') : null; }
 
   // ------------------------------------------------------------ 蜘蛛绘制（火柴棍风格）
   function drawSpider(ctx, x, y, h, ph, sc, color, alpha) {
@@ -363,15 +382,27 @@
       row1.append(el('i', 'vdot'), el('b', '', r.cat_zh || r.cat), el('span', 'conf', Math.round((r.cat_conf || 0) * 100) + '%'));
       const st = starsEl(r.stars, r.importance);
       if (st) row1.append(st);
-      const row2 = el('div', 'vrow');
-      row2.append(el('span', '', '📅'));
-      if (r.deadline) row2.append(el('span', '', fmtDdl(r.deadline)));
-      row2.append(el('span', 'badge b-' + r.ddl_status, DDL_ZH[r.ddl_status] || r.ddl_status));
+      const timeRows = [];
+      if (r.event_start) {
+        const rw = el('div', 'vrow');
+        rw.append(el('span', '', '📅'), el('span', '', fmtEvent(r.event_start, r.event_end) + (r.event_place ? ' · ' + r.event_place : '')), evBadge(r));
+        timeRows.push(rw);
+      }
+      if (r.deadline) {
+        const rw = el('div', 'vrow');
+        rw.append(el('span', '', '⏳'), el('span', '', '截止 ' + fmtDdl(r.deadline)), ddlBadge(r));
+        timeRows.push(rw);
+      }
+      if (!timeRows.length) {
+        const rw = el('div', 'vrow');
+        rw.append(el('span', '', '📅'), el('span', 'badge b-none', '无截止'));
+        timeRows.push(rw);
+      }
       const row3 = el('div', 'vrow');
       const act = (r.action || 0) >= 0.6;
       row3.append(el('span', 'badge ' + (act ? 'b-todo' : 'b-none'), act ? '✋ 要动手' : '不用动手'),
         el('span', 'conf', Math.round((r.action || 0) * 100) + '%'));
-      this.verdict.replaceChildren(row1, row2, row3);
+      this.verdict.replaceChildren(row1, ...timeRows, row3);
       this.state = 'result';
       this.t = 0;
       scheduleRefresh();
@@ -612,7 +643,7 @@
     const exp = S.view === 'expired';
     const cols = [];
     if (exp) cols.push(['', 38]);
-    cols.push(['日期', 118], ['类别', 150], ['重要', 84], ['主题', 0], ['发件人', 210], ['DDL', 130], ['状态', 84]);
+    cols.push(['日期', 118], ['类别', 150], ['重要', 84], ['主题', 0], ['发件人', 170], ['时间', 250], ['状态', 92]);
     const tr = $('#lhead');
     tr.replaceChildren();
     for (const [name, w] of cols) {
@@ -703,9 +734,12 @@
       const tf = el('td', '', shortFrom(m.sender));
       tf.title = m.sender || '';
       tr.append(tf);
-      tr.append(el('td', 'mono', m.deadline ? fmtDdl(m.deadline) : ''));
+      // 时间列：优先活动时间区间，其次截止；状态标签同理
+      const tw = el('td', 'mono', m.event_start ? fmtEvent(m.event_start, m.event_end) : (m.deadline ? '截止 ' + fmtDdl(m.deadline) : ''));
+      if (m.event_start) tw.title = '活动' + (m.event_place ? ' · ' + m.event_place : '') + (m.deadline ? '\n截止 ' + fmtDdl(m.deadline) : '');
+      tr.append(tw);
       const tst = el('td');
-      if (m.classified) tst.append(el('span', 'badge b-' + m.ddl_status, DDL_ZH[m.ddl_status] || ''));
+      if (m.classified) { const bg = m.event_start ? evBadge(m) : ddlBadge(m); if (bg) tst.append(bg); }
       tr.append(tst);
       tr.addEventListener('click', () => openDrawer(m.uid));
       frag.append(tr);
@@ -866,11 +900,21 @@
     load() { return this.mode === 'week' ? this.loadWeek() : this.loadMonth(); },
     render() { if (this.mode === 'week') this.renderWeek(); else this.renderMonth(); },
     visible(m) {
-      if (this.hideExp && m.ddl_status === 'expired') return false;
+      if (this.hideExp && m.past) return false;
       if (this.min3 && !(m.stars >= 3)) return false;
       return true;
     },
-    timeText(m) { return m.has_time ? m.deadline.slice(11, 16) : '全天'; },
+    // 活动的时间段文字：14:00–15:30（没写结束时间只写开始；全天活动写「全天」）
+    evRange(m) { return m.all_day ? '全天' : (m.end_default ? m.start.slice(11, 16) : m.start.slice(11, 16) + '–' + m.end_time); },
+    timeText(m) {
+      if (m.kind === 'event') return this.evRange(m);
+      return m.has_time ? '截止 ' + m.start.slice(11, 16) : '当天截止';
+    },
+    // 条目悬停/标题里的一行说明
+    descLine(m) {
+      if (m.kind === 'event') return '活动 ' + fmtEvent(m.start, m.end || (m.end_default ? '' : m.start.slice(0, 11) + m.end_time)) + (m.event_place ? ' · ' + m.event_place : '') + ' · ' + (EV_ZH[m.ev_status] || '');
+      return '截止 ' + fmtDdl(m.start, true) + (m.past ? ' · 已过期' : '');
+    },
     dots(n) {
       if (!n) return null;
       const d = el('span', 'dots s' + n, '●'.repeat(n));
@@ -910,16 +954,16 @@
       node.addEventListener('mouseleave', () => { t.hidden = true; });
     },
     // 截止栏：每天最多 1 个标签（星级最高，同星取时间最早），其余合并成 +N，点 +N 议程滚到那天
-    dueCell(list, k) {
-      const sorted = list.slice().sort((a, b) => (b.stars || 0) - (a.stars || 0) || a.deadline.localeCompare(b.deadline));
+    dueCell(list, k, cls) {
+      const sorted = list.slice().sort((a, b) => (b.stars || 0) - (a.stars || 0) || a.start.localeCompare(b.start));
       const m = sorted[0];
-      const c = el('div', 'duechip' + (m.ddl_status === 'expired' ? ' exp' : ''), m.subject || '(无主题)');
-      c.title = '截止 ' + fmtDdl(m.deadline) + (m.stars ? ' · ★' + m.stars : '') + '\n' + (m.subject || '') + (m.ddl_status === 'expired' ? '\n已过期' : '');
+      const c = el('div', (cls || 'duechip') + (m.past ? ' exp' : ''), m.subject || '(无主题)');
+      c.title = this.descLine(m) + (m.stars ? ' · ★' + m.stars : '') + '\n' + (m.subject || '');
       c.addEventListener('click', () => openDrawer(m.uid));
       const nodes = [c];
       if (sorted.length > 1) {
         const more = el('button', 'duemore', '+' + (sorted.length - 1));
-        more.title = '这天还有 ' + (sorted.length - 1) + ' 个截止，点击在右侧议程里查看';
+        more.title = '这天还有 ' + (sorted.length - 1) + ' 项，点击在右侧议程里查看';
         more.addEventListener('click', () => {
           const g = document.querySelector('#wkagenda .agday[data-day="' + k + '"]');
           if (g) { g.scrollIntoView({ behavior: 'smooth', block: 'start' }); g.classList.add('flash'); setTimeout(() => g.classList.remove('flash'), 1200); }
@@ -946,10 +990,10 @@
     // 邮件活动：不画成块，只在该时段、该天列的右边缘画一条 4px 竖条（类别色；与课冲突=红色）
     mailStrip(m, hpx) {
       const conf = (m.conflicts || []).length > 0;
-      const b = el('div', 'wkstrip' + (m.ddl_status === 'expired' ? ' exp' : '') + (conf ? ' hasconf' : ''));
+      const b = el('div', 'wkstrip' + (m.past ? ' exp' : '') + (conf ? ' hasconf' : '') + (m.ev_status === 'ongoing' ? ' live' : ''));
       b.style.setProperty('--cc', conf ? 'var(--due)' : (CAT_COLOR[m.cat] || '#8794a8'));
       b.style.height = hpx + 'px';
-      const lines = [m.subject || '(无主题)', m.deadline.slice(11, 16) + '–' + m.end_time + (m.stars ? ' · ★' + m.stars : '') + (m.ddl_status === 'expired' ? ' · 已过期' : '')];
+      const lines = [m.subject || '(无主题)', this.evRange(m) + (m.event_place ? ' · ' + m.event_place : '') + (m.stars ? ' · ★' + m.stars : '') + (m.ev_status === 'ongoing' ? ' · 进行中' : m.past ? ' · 已结束' : '')];
       if (conf) lines.push(this.conflictText(m));
       this.tip(b, lines);
       b.addEventListener('click', () => openDrawer(m.uid));
@@ -966,17 +1010,18 @@
       const tt = w.timetable || {};
       const hol = {};
       for (const h of tt.holidays || []) hol[h.date] = h.label;
-      const occBy = {}, evBy = {}, dueBy = {};
+      const occBy = {}, evBy = {}, dueBy = {}, adBy = {};
       for (const o of tt.occurrences || []) (occBy[o.date] = occBy[o.date] || []).push(o);
       const vis = (w.items || []).filter(m => this.visible(m));
       for (const m of vis) {
-        const k = m.deadline.slice(0, 10);
-        ((m.kind === 'event' ? evBy : dueBy)[k] = (m.kind === 'event' ? evBy : dueBy)[k] || []).push(m);
+        const k = m.start.slice(0, 10);
+        const grp = m.kind === 'due' ? dueBy : (m.all_day ? adBy : evBy);     // 截止栏只放截止；全天活动单独一行
+        (grp[k] = grp[k] || []).push(m);
       }
       // 网格起点：默认 8 点，有更早的课/活动就往前扩
       let gs = 8;
       for (const o of tt.occurrences || []) gs = Math.min(gs, Math.floor(hmMin(o.start) / 60));
-      for (const m of vis) if (m.kind === 'event') gs = Math.min(gs, Math.floor(hmMin(m.deadline.slice(11, 16)) / 60));
+      for (const m of vis) if (m.kind === 'event' && !m.all_day) gs = Math.min(gs, Math.floor(hmMin(m.start.slice(11, 16)) / 60));
       const gridH = (24 - gs) * HP;
       $('#calview').style.setProperty('--hp', HP + 'px');
       const topOf = min => PAD + (min - gs * 60) / 60 * HP;
@@ -989,6 +1034,20 @@
         head.push(h);
       });
       $('#wkhead').replaceChildren(...head);
+
+      // ---- 全天活动栏（这周没有全天活动就整栏隐藏）
+      const adRow = $('#wkallday');
+      const anyAd = keys.some(k => (adBy[k] || []).length);
+      adRow.hidden = !anyAd;
+      if (anyAd) {
+        const cells = [el('div', '', '全天')];
+        keys.forEach(k => {
+          const c = el('div', (k === today ? 'today' : '') + (hol[k] ? ' hol' : ''));
+          if ((adBy[k] || []).length) c.append(...this.dueCell(adBy[k], k, 'adchip'));
+          cells.push(c);
+        });
+        adRow.replaceChildren(...cells);
+      }
 
       // ---- 截止栏（固定一行；这周没有截止就整栏隐藏）
       const dueRow = $('#wkdue');
@@ -1023,7 +1082,7 @@
           col.append(hd);
         }
         // 竖条的并排道数决定课程块右边留多宽（一般 1 道：留 9px）
-        const strips = layoutLanes((evBy[k] || []).map(m => ({ s: hmMin(m.deadline.slice(11, 16)), e: hmMin(m.end_time), mail: m })));
+        const strips = layoutLanes((evBy[k] || []).map(m => ({ s: hmMin(m.start.slice(11, 16)), e: hmMin(m.end_time), mail: m })));
         const lanes = strips.reduce((n, b) => Math.max(n, b.lanes), 1);
         const reserve = 3 + lanes * 6;
         for (const o of occBy[k] || []) {
@@ -1059,7 +1118,7 @@
         const cur = keys.includes(today);
         $('#wkscroll').scrollTop = cur && nowMin > 9 * 60 ? Math.max(0, topOf(nowMin - 90)) : 0;
       }
-      this.renderAgenda(days, keys, hol, occBy, evBy, dueBy, today, nowMin);
+      this.renderAgenda(days, keys, hol, occBy, evBy, dueBy, adBy, today, nowMin);
     },
     card(kind, past) {
       const c = el('div', 'agcard ' + kind + (kind !== 'course' && kind !== 'holc' ? ' click' : '') + (past ? ' past' : ''));
@@ -1075,7 +1134,7 @@
       if (stars) r3.append(el('span', 'agstar', '★' + stars));
       return r3;
     },
-    renderAgenda(days, keys, hol, occBy, evBy, dueBy, today, nowMin) {
+    renderAgenda(days, keys, hol, occBy, evBy, dueBy, adBy, today, nowMin) {
       const box = $('#wkagenda');
       box.replaceChildren();
       const curWeek = keys.includes(today);
@@ -1085,7 +1144,8 @@
         if (curWeek && k < today) return;
         const entries = [];
         for (const o of occBy[k] || []) entries.push({ t: hmMin(o.start), course: o });
-        for (const m of evBy[k] || []) entries.push({ t: hmMin(m.deadline.slice(11, 16)), mail: m });
+        for (const m of adBy[k] || []) entries.push({ t: -1, mail: m });
+        for (const m of evBy[k] || []) entries.push({ t: hmMin(m.start.slice(11, 16)), mail: m });
         for (const m of dueBy[k] || []) entries.push({ t: 24 * 60, due: m });
         if (!entries.length && !hol[k]) return;
         entries.sort((a, b) => a.t - b.t || (b.due ? (a.due ? (b.due.stars || 0) - (a.due.stars || 0) : -1) : 0));
@@ -1111,18 +1171,19 @@
             g.append(c);
           } else if (e.mail) {
             const m = e.mail;
-            const [c, b] = this.card('mail', m.ddl_status === 'expired');
+            const [c, b] = this.card('mail', m.past);
             c.style.setProperty('--cc', CAT_COLOR[m.cat] || '#8794a8');
             const r1 = el('div', 'agr1');
-            r1.append(ico('mail'), document.createTextNode(m.deadline.slice(11, 16) + ' - ' + m.end_time));
-            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), this.agRow3(m.cat_zh || m.cat, m.stars));
+            r1.append(ico('mail'), document.createTextNode(this.evRange(m)));
+            if (m.ev_status === 'ongoing') r1.append(el('span', 'badge b-ongoing', '进行中'));
+            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), this.agRow3(m.event_place || m.cat_zh || m.cat, m.stars));
             if ((m.conflicts || []).length) b.append(el('div', 'agwarn', this.conflictText(m)));
             c.addEventListener('click', () => openDrawer(m.uid));
             g.append(c);
           } else {
             const m = e.due;
-            const [c, b] = this.card('due', m.ddl_status === 'expired');
-            b.append(el('div', 'agr1', '当天截止'), el('div', 'agr2', m.subject || '(无主题)'), this.agRow3(m.cat_zh || m.cat, m.stars));
+            const [c, b] = this.card('due', m.past);
+            b.append(el('div', 'agr1', m.has_time ? '截止 ' + m.start.slice(11, 16) : '当天截止'), el('div', 'agr2', m.subject || '(无主题)'), this.agRow3(m.cat_zh || m.cat, m.stars));
             c.addEventListener('click', () => openDrawer(m.uid));
             g.append(c);
           }
@@ -1163,21 +1224,21 @@
       this.renderMonth();
     },
     chip(m) {
-      const c = el('div', 'chip s' + (m.stars || 0) + (m.ddl_status === 'expired' ? ' exp' : ''));
+      const c = el('div', 'chip s' + (m.stars || 0) + (m.past ? ' exp' : '') + (m.kind === 'due' ? ' dueb' : ''));
       c.style.setProperty('--cc', CAT_COLOR[m.cat] || '#888');
-      if (m.has_time) c.append(el('span', 'ct2', m.deadline.slice(11, 16)));
+      if (m.has_time) c.append(el('span', 'ct2', m.start.slice(11, 16)));
       c.append(el('span', 'cs', m.subject || '(无主题)'));
       const d = this.dots(m.stars);
       if (d) c.append(d);
-      c.title = (m.subject || '') + '\n' + fmtDdl(m.deadline) + ' · ' + (m.cat_zh || '') + (m.ddl_status === 'expired' ? ' · 已过期' : '');
+      c.title = (m.subject || '') + '\n' + this.descLine(m) + ' · ' + (m.cat_zh || '');
       c.addEventListener('click', ev => { ev.stopPropagation(); openDrawer(m.uid); });
       return c;
     },
     row(m, withDate) {
-      const r = el('div', 'crow s' + (m.stars || 0) + (m.ddl_status === 'expired' ? ' exp' : ''));
+      const r = el('div', 'crow s' + (m.stars || 0) + (m.past ? ' exp' : ''));
       const when = el('div', 'cwhen');
       if (withDate) {
-        const d = parseYmd(m.deadline);
+        const d = parseYmd(m.start);
         when.append(el('b', '', (d.getMonth() + 1) + '月' + d.getDate() + '日 周' + WEEK_ZH[d.getDay()]), document.createTextNode(this.timeText(m)));
       } else {
         when.append(el('b', '', this.timeText(m)));
@@ -1189,7 +1250,9 @@
       const dot = el('i'); dot.style.background = CAT_COLOR[m.cat] || '#888';
       pill.append(dot, el('span', '', m.cat_zh || m.cat || ''));
       meta.append(pill);
-      if (m.ddl_status === 'expired') meta.append(el('span', 'badge b-expired', '已过期'));
+      if (m.kind === 'event') { if (m.ev_status !== 'upcoming') { const bg = evBadge(m); if (bg) meta.append(bg); } }
+      else if (m.past) meta.append(el('span', 'badge b-expired', '已过期'));
+      if (m.kind === 'event' && m.event_place) meta.append(el('span', '', '📍 ' + m.event_place));
       const se = starsEl(m.stars, m.importance);
       if (se) meta.append(se);
       r.append(when, sub, meta);
@@ -1200,7 +1263,7 @@
       const [a] = this.range();
       this.updateTitle();
       const byDay = {};
-      for (const m of this.items) if (this.visible(m)) (byDay[m.deadline.slice(0, 10)] = byDay[m.deadline.slice(0, 10)] || []).push(m);
+      for (const m of this.items) if (this.visible(m)) (byDay[m.start.slice(0, 10)] = byDay[m.start.slice(0, 10)] || []).push(m);
       const today = ymd(new Date());
       const cells = [];
       for (let i = 0; i < 42; i++) {
@@ -1425,12 +1488,18 @@
           add('重要程度', '', w);
         }
         add('要动手', (m.action >= 0.6 ? '是 ' : '否 ') + Math.round((m.action || 0) * 100) + '%');
-        add('DDL', '', (() => {
+        if (m.event_start) {
           const s = el('span');
-          s.append(document.createTextNode((m.deadline ? fmtDdl(m.deadline) + (m.deadline_text ? '（原文：' + m.deadline_text + '）' : '') : '') + ' '),
-            el('span', 'badge b-' + m.ddl_status, DDL_ZH[m.ddl_status] || ''));
-          return s;
-        })());
+          s.append(document.createTextNode(fmtEvent(m.event_start, m.event_end) + (m.event_place ? ' · ' + m.event_place : '') + ' · '), evBadge(m));
+          s.title = m.event_text ? '邮件原文：' + m.event_text : '';
+          add('活动', '', s);
+        }
+        if (m.deadline) {
+          const s = el('span');
+          s.append(document.createTextNode(fmtDdl(m.deadline, true) + ' · '), ddlBadge(m));
+          s.title = m.deadline_text ? '邮件原文：' + m.deadline_text : '';
+          add('截止', '', s);
+        }
       }
       const ctx = { add, note: el('div'), atts: el('div'), body: el('div'), metaDone: false, saved: {} };
       ctx.body.append(el('div', 'dbody', m.body || '（正文为空）'));       // 先给本地纯文本，原文取回来再替换

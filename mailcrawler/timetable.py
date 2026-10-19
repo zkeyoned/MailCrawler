@@ -15,7 +15,6 @@ from datetime import datetime, timedelta
 
 from . import paths, store
 
-EVENT_MINUTES = 60          # 邮件活动没有结束时间时默认占 1 小时
 
 
 def file_path():
@@ -120,23 +119,21 @@ def overlap_minutes(a_start, a_end, b_start, b_end):
 
 
 def classify_and_annotate(items, occurrences):
-    """给日历条目加 kind / end_time / conflicts（原地修改并返回）。
-    kind：event=有具体时间（画成时间块，默认 1 小时）；due=没具体时间（23:59 或只有日期，当天截止）。
-    冲突：event 与同一天的课时间重叠，记重叠分钟数。"""
+    """给日历条目加 conflicts（原地修改并返回）。条目的 kind 已由 store.calendar_items 定好：
+    event=邮件里的活动（start→end_time 真实起止，没写结束时间按 1 小时）；due=截止（不占时间段）。
+    冲突：有具体时间的 event 与同一天的课时间重叠，记重叠分钟数。"""
     by_day = {}
     for o in occurrences:
         by_day.setdefault(o["date"], []).append(o)
     for it in items:
-        dt = store.parse_dt(it["deadline"])
         it["conflicts"] = []
-        if not it.get("has_time"):
-            it["kind"] = "due"
+        if it.get("kind") != "event" or not it.get("has_time"):
             continue
-        it["kind"] = "event"
-        s = dt.hour * 60 + dt.minute
-        e = min(s + EVENT_MINUTES, 24 * 60)
-        it["end_time"] = "24:00" if e == 24 * 60 else _fmt(e)
-        for o in by_day.get(dt.strftime("%Y-%m-%d"), []):
+        s = _hm(str(it["start"])[11:16])
+        e = _hm(it.get("end_time"))
+        if s is None or e is None:
+            continue
+        for o in by_day.get(str(it["start"])[:10], []):
             ov = overlap_minutes(s, e, _hm(o["start"]), _hm(o["end"]))
             if ov > 0:
                 it["conflicts"].append({"course_index": o["course_index"], "name": o["name"], "code": o["code"],
@@ -173,7 +170,7 @@ def normalize_subject(subject):
 def week_filter(items):
     """周视图/议程用的默认过滤（永远生效，不受前端开关影响）：
     排除 系统自动通知 / 被忽略发件人命中的 / 主题以「发件人已撤回」开头的；
-    同一天同一标准化主题只留一条：星级最高、时间最早（再按 uid）。"""
+    同一天、同一类（活动/截止）、同一标准化主题只留一条：星级最高、时间最早（再按 uid）。"""
     best = {}
     for it in items:
         subj = str(it.get("subject") or "").strip()
@@ -181,12 +178,12 @@ def week_filter(items):
             continue
         if subj.startswith(RECALLED) or normalize_subject(subj).startswith(RECALLED):
             continue
-        key = (str(it["deadline"])[:10], normalize_subject(subj).casefold())
-        rank = (-(it.get("stars") or 0), str(it["deadline"]), it.get("uid") or 0)
+        key = (str(it["start"])[:10], it.get("kind"), normalize_subject(subj).casefold())
+        rank = (-(it.get("stars") or 0), str(it["start"]), it.get("uid") or 0)
         if key not in best or rank < best[key][0]:
             best[key] = (rank, it)
     out = [v[1] for v in best.values()]
-    out.sort(key=lambda i: (str(i["deadline"]), i.get("uid") or 0))
+    out.sort(key=lambda i: (str(i["start"]), i.get("uid") or 0))
     return out
 
 

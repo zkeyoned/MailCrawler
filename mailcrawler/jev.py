@@ -126,59 +126,112 @@ def importance_instructions(prefs):
             "whenever they apply):\n" + prefs)
 
 
-def build_questions(cands, prefs=""):
-    """一封邮件对应的全部问题：类别、要不要动手、重要程度，有日期候选时再加「哪个是截止日期」。"""
-    questions = {
-        "cat": {"type": "choice", "instructions": "What kind of email is this", "criteria": CATS},
-        "action": {"type": "noul",
-                   "instructions": "The student must personally do something (submit, register, reply, pay, attend) because of this email"},
-        "importance": {"type": "score", "instructions": importance_instructions(prefs), "criteria": IMPORTANCE_LEVELS},
+def date_questions(cands):
+    """有日期候选时的两道选择题（同一次请求里问）：活动本身是哪天 / 学生要在哪天前动手。"""
+    crit = {}
+    for i, cd in enumerate(cands):
+        crit["d%d" % i] = '"%s" (read as %s)' % (cd["ctx"], ddl.read_as(cd))
+    return {
+        "event_date": {"type": "choice",
+                       "instructions": "Which candidate is when the event/lecture/session itself takes place",
+                       "criteria": dict(crit, none="None of these is when an event, lecture or session takes place")},
+        "deadline_date": {"type": "choice",
+                          "instructions": "Which candidate is the deadline by which the student must act "
+                                          "(submit, register, apply, pay, reply)",
+                          "criteria": dict(crit, none="None of these is a deadline the student must act by")},
     }
+
+
+def build_questions(cands, prefs="", dates_only=False):
+    """一封邮件对应的全部问题：类别、要不要动手、重要程度，有日期候选时再加「活动是哪天」「截止是哪天」两题。
+    dates_only=True 只问日期那两题（回填时用）。"""
+    questions = {}
+    if not dates_only:
+        questions = {
+            "cat": {"type": "choice", "instructions": "What kind of email is this", "criteria": CATS},
+            "action": {"type": "noul",
+                       "instructions": "The student must personally do something (submit, register, reply, pay, attend) because of this email"},
+            "importance": {"type": "score", "instructions": importance_instructions(prefs), "criteria": IMPORTANCE_LEVELS},
+        }
     if cands:
-        crit = {}
-        for i, cd in enumerate(cands):
-            crit["d%d" % i] = '"%s" (read as %s)' % (cd["ctx"], cd["dt"].strftime("%Y-%m-%d %H:%M") if cd["has_time"] else cd["date"].isoformat())
-        crit["none"] = "No deadline or event date that matters to the student"
-        questions["ddl"] = {"type": "choice", "instructions": "Which date is the deadline (or the event date) that matters to the student",
-                            "criteria": crit}
+        questions.update(date_questions(cands))
     return questions
 
 
-def analyze(e, prefs="", ignore_text="", key=None, count=True):
+def pick_candidate(answers, name, cands):
+    """从 answers[name] 里取选中的候选（置信度太低、选了 none、缺答案都当没有）。返回 (候选或 None, 置信度)。"""
+    a = answers.get(name)
+    if not cands or not a:
+        return None, 0.0
+    conf = float(a.get("confidence") or 0)
+    m = re.fullmatch(r"d(\d)", str(a.get("choice") or "none"))
+    # 置信度太低（Jev 自己都拿不准）就当没有，避免把不确定的日期误判成「已过期」后建议删除
+    if m and int(m.group(1)) < len(cands) and conf >= DDL_MIN_CONF:
+        return cands[int(m.group(1))], conf
+    return None, conf
+
+
+def time_result(cands, answers, text):
+    """把两道日期题的答案解析成 deadline / event 字段。text=主题+正文（取地点用）。
+
+    活动：event_start/event_end 为 'YYYY-MM-DD HH:MM'；没写时间的活动存成当天 00:00–23:59（=全天）；只有开始时间时 event_end 为空。
+    两题选了同一个候选时：它带时间段（14:00-15:30）就当活动；否则谁置信度高算谁（平手算截止）。"""
+    ev, ev_conf = pick_candidate(answers, "event_date", cands)
+    dl, dl_conf = pick_candidate(answers, "deadline_date", cands)
+    if ev is not None and ev is dl:
+        if ev["has_end"] or ev_conf > dl_conf:
+            dl, dl_conf = None, 0.0
+        else:
+            ev, ev_conf = None, 0.0
+    out = {"deadline": "", "deadline_text": "", "ddl_conf": dl_conf, "event_start": "", "event_end": "",
+           "event_text": "", "event_place": "", "event_conf": ev_conf}
+    if dl is not None:
+        out["deadline"] = dl["dt"].strftime("%Y-%m-%d %H:%M")
+        out["deadline_text"] = dl["raw"]
+    if ev is not None:
+        if ev["has_time"]:
+            out["event_start"] = ev["dt"].strftime("%Y-%m-%d %H:%M")
+            out["event_end"] = ev["dt_end"].strftime("%Y-%m-%d %H:%M") if ev["has_end"] else ""
+        else:
+            out["event_start"] = ev["date"].strftime("%Y-%m-%d") + " 00:00"
+            out["event_end"] = ev["date"].strftime("%Y-%m-%d") + " 23:59"
+        out["event_text"] = ev["raw"]
+        out["event_place"] = ddl.extract_place(text)
+    return out
+
+
+def analyze(e, prefs="", ignore_text="", key=None, count=True, dates_only=False):
     """对一封邮件（dict：date/sender/subject/body）做完整判断，不碰数据库。
 
-    返回 dict：cat, cat_conf, action, deadline, deadline_text, ddl_conf, importance(1~5 的小数), imp_conf,
-    ignored(是否被发件人规则直接忽略), usage, candidates。命中忽略规则时不调用 Jev。
+    返回 dict：cat, cat_conf, action, deadline, deadline_text, ddl_conf, event_start, event_end, event_text,
+    event_place, event_conf, importance(1~5 的小数), imp_conf, ignored(是否被发件人规则直接忽略), usage, candidates。
+    命中忽略规则时不调用 Jev。dates_only=True（回填用）只问日期两题，返回里没有 cat/importance 等。
     """
     sender = e.get("sender") or ""
+    blank = {"deadline": "", "deadline_text": "", "ddl_conf": 0.0, "event_start": "", "event_end": "", "event_text": "",
+             "event_place": "", "event_conf": 0.0}
     if ignored_by(sender, ignore_text):
-        return {"cat": "ignored", "cat_conf": 1.0, "action": 0.0, "deadline": "", "deadline_text": "", "ddl_conf": 0.0,
-                "importance": 1.0, "imp_conf": 1.0, "ignored": True, "usage": {}, "candidates": 0}
+        return dict(blank, cat="ignored", cat_conf=1.0, action=0.0, importance=1.0, imp_conf=1.0, ignored=True,
+                    usage={}, candidates=0)
     sent = store.parse_dt(e.get("date") or "")
     subject, body = e.get("subject") or "", e.get("body") or ""
-    cands = ddl.extract_candidates(subject + " ¶ " + body, sent)
+    text = subject + " ¶ " + body
+    cands = ddl.extract_candidates(text, sent)
     state = "Email received by a university student.\nDate: %s\nFrom: %s\nSubject: %s\n\n%s" % (
-        e.get("date"), sender, subject, body[:JEV_STATE_BODY])
-    answers, usage = jev_call(state, build_questions(cands, prefs), key=key, count=count)
-    cat = answers["cat"]["choice"]
-    cat_conf = float(answers["cat"].get("confidence") or 0)
-    action = float(answers["action"]["noul"])
-    importance = clamp_importance(float(answers["importance"]["score"]) + 1)   # Jev 的 score 从 0 起，+1 = 1~5 星
-    imp_conf = float(answers["importance"].get("confidence") or 0)
-    deadline = deadline_text = ""
-    ddl_conf = 0.0
-    if cands and "ddl" in answers:
-        ch = str(answers["ddl"].get("choice") or "none")
-        ddl_conf = float(answers["ddl"].get("confidence") or 0)
-        m = re.fullmatch(r"d(\d)", ch)
-        # 置信度太低（Jev 自己都拿不准）就当没有截止，避免把不确定的日期误判成「已过期」后建议删除
-        if m and int(m.group(1)) < len(cands) and ddl_conf >= DDL_MIN_CONF:
-            cd = cands[int(m.group(1))]
-            deadline = cd["dt"].strftime("%Y-%m-%d %H:%M")
-            deadline_text = cd["raw"]
-    return {"cat": cat, "cat_conf": cat_conf, "action": action, "deadline": deadline, "deadline_text": deadline_text,
-            "ddl_conf": ddl_conf, "importance": importance, "imp_conf": imp_conf, "ignored": False,
-            "usage": usage, "candidates": len(cands)}
+        e.get("date"), sender, subject, ddl.clean_text(body)[:JEV_STATE_BODY])
+    questions = build_questions(cands, prefs, dates_only=dates_only)
+    if not questions:                       # 回填：没有候选日期，不用问
+        return dict(blank, ignored=False, usage={}, candidates=0)
+    answers, usage = jev_call(state, questions, key=key, count=count)
+    out = dict(blank, ignored=False, usage=usage, candidates=len(cands))
+    out.update(time_result(cands, answers, text))
+    if not dates_only:
+        out["cat"] = answers["cat"]["choice"]
+        out["cat_conf"] = float(answers["cat"].get("confidence") or 0)
+        out["action"] = float(answers["action"]["noul"])
+        out["importance"] = clamp_importance(float(answers["importance"]["score"]) + 1)   # Jev 的 score 从 0 起，+1 = 1~5 星
+        out["imp_conf"] = float(answers["importance"].get("confidence") or 0)
+    return out
 
 
 def clamp_importance(x):
@@ -204,7 +257,9 @@ def classify(uid):
             store.meta_add("errors")
             raise
         store.save_triage(uid, r["cat"], r["cat_conf"], r["action"], r["deadline"], r["deadline_text"], r["ddl_conf"],
-                          r["usage"], importance=r["importance"], imp_conf=r["imp_conf"], ignored=r["ignored"])
+                          r["usage"], importance=r["importance"], imp_conf=r["imp_conf"], ignored=r["ignored"],
+                          event_start=r["event_start"], event_end=r["event_end"], event_text=r["event_text"],
+                          event_place=r["event_place"], event_conf=r["event_conf"])
         with CLAIM_LOCK:
             CLAIMS.pop(uid, None)
         out = store.triage_public(store.triage_row(uid))

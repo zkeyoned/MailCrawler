@@ -4,10 +4,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import store
+from . import ddl, store
 
 TZ = "Asia/Shanghai"
-EVENT_MINUTES = 60
 
 # 中国没有夏令时，固定 +0800
 VTIMEZONE = [
@@ -46,23 +45,39 @@ def build(items, now=None):
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//MailCrawler//Calendar//ZH", "CALSCALE:GREGORIAN",
              "METHOD:PUBLISH", "X-WR-CALNAME:邮件爬虫", "X-WR-TIMEZONE:" + TZ] + VTIMEZONE
     for it in items:
-        dt = store.parse_dt(it["deadline"])
+        # 兼容：没有 kind 的老条目（只有 deadline）按「截止」处理
+        is_event = it.get("kind") == "event"
+        dt = store.parse_dt(it.get("start") or it.get("deadline") or "")
         if dt is None:
             continue
         stars = it.get("stars")
         desc = "类别：%s" % (it.get("cat_zh") or it.get("cat") or "未分类")
         desc += "\n重要程度：%s" % (("★" * stars + "☆" * (5 - stars) + "（%d 星）" % stars) if stars else "未评")
-        if it.get("deadline_text"):
-            desc += "\n邮件原文：%s" % it["deadline_text"]
-        ev = ["BEGIN:VEVENT", "UID:mailcrawler-%s@local" % it["uid"], "DTSTAMP:" + stamp]
-        if it.get("has_time"):
-            end = dt + timedelta(minutes=EVENT_MINUTES)
+        orig = it.get("event_text") if is_event else it.get("deadline_text")
+        if orig:
+            desc += "\n邮件原文：%s" % orig
+        ev = ["BEGIN:VEVENT", "UID:mailcrawler-%s%s@local" % (it["uid"], "-event" if is_event else ""), "DTSTAMP:" + stamp]
+        if is_event:
+            if it.get("all_day"):
+                ev += ["DTSTART;VALUE=DATE:" + dt.strftime("%Y%m%d"),
+                       "DTEND;VALUE=DATE:" + (dt + timedelta(days=1)).strftime("%Y%m%d")]
+            else:
+                end = ddl.event_end_eff(dt, store.parse_dt(it.get("end") or ""))     # 没写结束时间按 1 小时
+                ev += ["DTSTART;TZID=%s:%s" % (TZ, dt.strftime("%Y%m%dT%H%M%S")),
+                       "DTEND;TZID=%s:%s" % (TZ, end.strftime("%Y%m%dT%H%M%S"))]
+            if it.get("event_place"):
+                ev.append("LOCATION:" + esc(it["event_place"]))
+        elif it.get("has_time"):
+            # 截止时刻：零长度事件（DTEND=DTSTART），日历里显示成一个时间点
             ev += ["DTSTART;TZID=%s:%s" % (TZ, dt.strftime("%Y%m%dT%H%M%S")),
-                   "DTEND;TZID=%s:%s" % (TZ, end.strftime("%Y%m%dT%H%M%S"))]
+                   "DTEND;TZID=%s:%s" % (TZ, dt.strftime("%Y%m%dT%H%M%S"))]
         else:
             ev += ["DTSTART;VALUE=DATE:" + dt.strftime("%Y%m%d"),
                    "DTEND;VALUE=DATE:" + (dt + timedelta(days=1)).strftime("%Y%m%d")]
-        ev += ["SUMMARY:" + esc(it.get("subject") or "(无主题)"), "DESCRIPTION:" + esc(desc), "END:VEVENT"]
+        title = it.get("subject") or "(无主题)"
+        if not is_event and it.get("kind") == "due":
+            title = "截止：" + title
+        ev += ["SUMMARY:" + esc(title), "DESCRIPTION:" + esc(desc), "END:VEVENT"]
         lines += ev
     lines.append("END:VCALENDAR")
     folded = []

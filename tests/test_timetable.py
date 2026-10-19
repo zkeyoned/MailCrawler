@@ -73,30 +73,32 @@ def test_overlap_minutes():
     assert f(600, 710, 660, 720) == 50 and f(600, 660, 660, 720) == 0 and f(600, 700, 610, 620) == 10 and f(0, 10, 20, 30) == 0
 
 
-def items_for(*specs):
-    out = []
-    for uid, dl, has in specs:
-        out.append({"uid": uid, "deadline": dl, "has_time": has})
-    return out
+def ev(uid, start, end_time, has=True):
+    return {"uid": uid, "kind": "event", "start": start, "end_time": end_time, "has_time": has}
 
 
-def test_conflicts_and_kinds():
+def test_conflicts_use_event_interval():
     occ, _ = timetable.expand(tt(), date(2026, 10, 19), date(2026, 10, 25))
-    items = timetable.classify_and_annotate(items_for(
-        (1, "2026-10-19 11:00", True),     # 课 10:00-11:50，活动 11:00-12:00 → 重叠 50
-        (2, "2026-10-19 12:00", True),     # 课已结束 → 无冲突
-        (3, "2026-10-19 09:30", True),     # 9:30-10:30 → 重叠 30
-        (4, "2026-10-19 23:59", False),    # 当天截止
-        (5, "2026-10-21 10:30", True),     # 数分 9:00-10:50，10:30-11:30 → 20
-        (6, "2026-10-22 23:30", True),     # 跨午夜：只算到 24:00
-    ), occ)
+    items = timetable.classify_and_annotate([
+        ev(1, "2026-10-19 11:00", "12:00"),    # 课 10:00-11:50，活动 11:00-12:00 → 重叠 50
+        ev(2, "2026-10-19 12:00", "13:00"),    # 课已结束 → 无冲突
+        ev(3, "2026-10-19 09:30", "10:30"),    # 9:30-10:30 → 重叠 30
+        {"uid": 4, "kind": "due", "start": "2026-10-19 23:59", "has_time": False},    # 截止不占时间段
+        {"uid": 7, "kind": "due", "start": "2026-10-19 10:30", "has_time": True},     # 截止时刻也不算冲突
+        ev(5, "2026-10-21 10:30", "11:30"),    # 数分 9:00-10:50，10:30-11:30 → 20
+        ev(6, "2026-10-22 23:30", "24:00"),    # 跨午夜：只算到 24:00
+        ev(8, "2026-10-19 14:00", "15:30"),    # 真实区间 14:00–15:30：不和上午的课冲突
+        ev(9, "2026-10-19 00:00", "23:59", has=False),    # 全天活动：不画时间块、不算冲突
+    ], occ)
     by = {i["uid"]: i for i in items}
-    assert by[1]["kind"] == "event" and by[1]["end_time"] == "12:00"
     assert by[1]["conflicts"] == [{"course_index": 0, "name": "常微分方程", "code": "MATH2043", "minutes": 50}]
     assert by[2]["conflicts"] == [] and by[3]["conflicts"][0]["minutes"] == 30
-    assert by[4]["kind"] == "due" and by[4]["conflicts"] == [] and "end_time" not in by[4]
+    assert by[4]["conflicts"] == [] and by[7]["conflicts"] == [] and by[9]["conflicts"] == []
     assert by[5]["conflicts"][0]["name"] == "数学分析" and by[5]["conflicts"][0]["minutes"] == 20
-    assert by[6]["end_time"] == "24:00"
+    assert by[8]["conflicts"] == []
+    # 活动区间比 1 小时长：10:30-13:00 与 10:00-11:50 重叠 80
+    only = timetable.classify_and_annotate([ev(1, "2026-10-19 10:30", "13:00")], occ)
+    assert only[0]["conflicts"][0]["minutes"] == 80
 
 
 def test_no_timetable_file_means_empty(monkeypatch):
@@ -120,11 +122,12 @@ def http(monkeypatch):
         monkeypatch.setattr(secrets, "ready", lambda: True)
         store.init_db()
         (Path(d) / "timetable.json").write_text(json.dumps(TT, ensure_ascii=False), encoding="utf-8")
-        for uid, subj, imp, dl in [(1, "与常微分冲突的讲座", 4, "2026-10-19 11:00"),
-                                   (2, "作业提交", 5, "2026-10-21 23:59"),
-                                   (3, "下周的事", 3, "2026-10-27 14:00")]:
+        for uid, subj, imp, dl, es, ee in [(1, "与常微分冲突的讲座", 4, "", "2026-10-19 11:00", "2026-10-19 12:00"),
+                                           (2, "作业提交", 5, "2026-10-21 23:59", "", ""),
+                                           (3, "下周的事", 3, "", "2026-10-27 14:00", "")]:
             store.insert_emails([(uid, "2026-10-01 10:00:00", "a@b.c", subj, "正文", 0, "x")])
-            store.save_triage(uid, "event", 0.9, 0.8, dl, "", 0.9, {}, importance=imp, imp_conf=0.9)
+            store.save_triage(uid, "event", 0.9, 0.8, dl, "", 0.9, {}, importance=imp, imp_conf=0.9,
+                              event_start=es, event_end=ee)
         srv, port = server.create_server()
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         base = "http://127.0.0.1:%d" % port
@@ -183,8 +186,8 @@ def test_normalize_subject():
     assert n("Research seminar") == "Research seminar"
 
 
-def _it(uid, subj, dl, stars, cat="event", ignored=False):
-    return {"uid": uid, "subject": subj, "deadline": dl, "stars": stars, "cat": cat, "ignored": ignored}
+def _it(uid, subj, dl, stars, cat="event", ignored=False, kind="event"):
+    return {"uid": uid, "subject": subj, "start": dl, "kind": kind, "stars": stars, "cat": cat, "ignored": ignored}
 
 
 def test_week_filter_exclusions_and_dedup():
@@ -209,6 +212,9 @@ def test_week_filter_exclusions_and_dedup():
     # 没星级（None）排最后
     out = timetable.week_filter([_it(1, "X", "2026-10-20 10:00", None), _it(2, "Re: X", "2026-10-20 11:00", 1)])
     assert [i["uid"] for i in out] == [2]
+    # 同一封邮件的活动和截止是两条，互不去重
+    out = timetable.week_filter([_it(1, "X", "2026-10-20 10:00", 3), _it(1, "X", "2026-10-20 23:59", 3, kind="due")])
+    assert [i["kind"] for i in out] == ["event", "due"]
 
 
 def test_api_week_filters_and_dedups(http):
@@ -216,7 +222,7 @@ def test_api_week_filters_and_dedups(http):
                                      (11, "发件人已撤回：讲座", "event", 5, "2026-10-20 10:00"),
                                      (12, "系统通知", "automated", 5, "2026-10-20 11:00")]:
         store.insert_emails([(uid, "2026-10-01 10:00:00", "a@b.c", subj, "正文", 0, "x")])
-        store.save_triage(uid, cat, 0.9, 0.8, dl, "", 0.9, {}, importance=imp, imp_conf=0.9)
+        store.save_triage(uid, cat, 0.9, 0.8, "", "", 0.9, {}, importance=imp, imp_conf=0.9, event_start=dl)
     code, w = http("/api/week?start=2026-10-19")
     assert code == 200
     assert [i["uid"] for i in w["items"]] == [1, 2]        # 10 是 1 的 Reminder 重复（星级低）、11 撤回、12 自动通知；3 在下一周

@@ -99,6 +99,9 @@ body.listmode .tools{opacity:.35;pointer-events:none}
 .b-open{background:#17382a;color:#5fdc9a}
 .b-none{background:#1d2531;color:#8794a8}
 .b-todo{background:#3a3016;color:#f1c453}
+.b-upcoming{background:#18273f;color:#8fb3ff}
+.b-ongoing{background:#1f6b45;color:#c8ffe0;box-shadow:0 0 0 1px #3fd18a66}
+.b-ended{background:#3a2a2e;color:#b58a8e}
 .cell .flash{position:absolute;right:8px;top:48px;z-index:7;font:700 12px var(--mono);letter-spacing:1px;color:#0a0e15;background:var(--c);padding:2px 8px;border-radius:5px;display:none}
 .cell.jev .flash{display:block;animation:jevp .7s ease-in-out infinite alternate}
 .cell.hasv .flash{display:none}
@@ -237,6 +240,7 @@ button.primary.big:disabled{opacity:.5;cursor:not-allowed}
 .dots{flex:none;font-size:6px;letter-spacing:1px;color:var(--dim2)}
 .dots.s5{color:#ff7b6b}.dots.s4{color:#ffb347}.dots.s3{color:#f1d453}
 .chip.exp,.crow.exp{opacity:.4}
+.chip.dueb .cs::before{content:"截止 ";color:var(--due,#e0707c);font-weight:600}
 .chip.exp .cs,.crow.exp .csub{text-decoration:line-through;text-decoration-color:#5a667866}
 .chip.s4 .cs,.chip.s5 .cs{font-weight:700;color:#f0f4fb}
 .chip.s5{border-color:#ff7b6b;background:#2a171a}
@@ -290,6 +294,10 @@ button.primary.big:disabled{opacity:.5;cursor:not-allowed}
 .duechip{flex:1 1 0;min-width:0;padding:2px 6px;border-radius:5px;background:rgba(224,112,124,.14);border:1px solid rgba(224,112,124,.38);color:#f0b4bb;font-size:11px;line-height:1.35;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .duechip:hover{background:rgba(224,112,124,.24)}
 .duechip.exp{opacity:.4;text-decoration:line-through}
+.wkallday>div:first-child{color:var(--blue)}
+.adchip{flex:1 1 0;min-width:0;padding:2px 6px;border-radius:5px;background:rgba(122,162,255,.13);border:1px solid rgba(122,162,255,.36);color:#b8ccff;font-size:11px;line-height:1.35;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.adchip:hover{background:rgba(122,162,255,.24)}
+.adchip.exp{opacity:.4;text-decoration:line-through}
 .duemore{flex:none;padding:2px 5px;border-radius:5px;font:600 11px/1.35 var(--mono);color:#f0b4bb;background:rgba(224,112,124,.08)}
 .duemore:hover{background:rgba(224,112,124,.28)}
 .wkgrid{position:relative}
@@ -318,6 +326,7 @@ button.primary.big:disabled{opacity:.5;cursor:not-allowed}
 .wkstrip::after{content:"";position:absolute;top:0;bottom:0;left:-4px;right:-3px}
 .wkstrip:hover{box-shadow:0 0 0 2px color-mix(in srgb,var(--cc) 35%,transparent)}
 .wkstrip.exp{opacity:.4}
+.wkstrip.live{box-shadow:0 0 0 2px #3fd18a88}
 #wktip{position:fixed;z-index:60;max-width:260px;padding:7px 10px;border-radius:8px;background:#1a2231;border:1px solid var(--line2);box-shadow:0 6px 20px rgba(0,0,0,.45);font-size:12px;line-height:1.45;pointer-events:none}
 #wktip .tt{font-weight:600;color:#eef2f9;overflow-wrap:anywhere}
 #wktip .tm{color:var(--dim);font-family:var(--mono);font-size:11.5px}

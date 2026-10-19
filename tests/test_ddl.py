@@ -95,6 +95,93 @@ def test_dmy_vs_mdy():
     assert str(c["dt"]).startswith("2026-10-16")
 
 
+def rng(text):
+    """候选的「开始–结束」，如 '2026-10-19 14:00–15:30'；只有开始时没有后半段。"""
+    return ddl.read_as(one(text))
+
+
+def test_time_ranges_separators():
+    for sep in ("-", "–", "—", "~", "至", "到", " - ", " to "):
+        assert rng("时间：2026年10月19日（星期一），14:00%s15:30" % sep) == "2026-10-19 14:00–15:30", sep
+
+
+def test_key_example_lecture():
+    c = one("时间：2026年10月19日（星期一），14:00-15:30　地点：大学会堂")
+    assert str(c["dt"]) == "2026-10-19 14:00:00" and str(c["dt_end"]) == "2026-10-19 15:30:00" and c["has_end"]
+
+
+def test_time_ranges_12h():
+    assert rng("Oct 19 2:00-3:30 pm") == "2026-10-19 14:00–15:30"
+    assert rng("Oct 19, 2-3:30pm") == "2026-10-19 14:00–15:30"
+    assert rng("Oct 19 2:00 PM - 3:30 PM") == "2026-10-19 14:00–15:30"
+    assert rng("Oct 19 9am-11am") == "2026-10-19 09:00–11:00"
+    assert rng("Oct 19 11:00-1:00 pm") == "2026-10-19 11:00–13:00"      # 只在结尾写 pm 会让开始晚于结束 → 开始不借用
+
+
+def test_time_ranges_bare_and_24h():
+    assert rng("全国大学生数学建模竞赛培训讲座_10月20日_2:00-3:30_T7-104") == "2026-10-20 14:00–15:30"
+    assert rng("10月19日 19:00-20:30") == "2026-10-19 19:00–20:30"
+    assert rng("10月19日 18:30–20:00") == "2026-10-19 18:30–20:00"
+    assert rng("10月19日 10:00-12:00") == "2026-10-19 10:00–12:00"
+
+
+def test_time_ranges_chinese():
+    assert rng("10月19日 下午2点到3点半") == "2026-10-19 14:00–15:30"
+    assert rng("10月19日 下午两点至三点") == "2026-10-19 14:00–15:00"
+    assert rng("10月19日 晚上7点到9点") == "2026-10-19 19:00–21:00"
+    assert rng("10月19日 10-12点") == "2026-10-19 10:00–12:00"
+
+
+def test_range_in_front_of_date():
+    c = one("18:00-20:00, 16 Oct 2026")
+    assert str(c["dt"]) == "2026-10-16 18:00:00" and str(c["dt_end"]) == "2026-10-16 20:00:00"
+
+
+def test_single_time_has_no_end():
+    c = one("请于10月19日 17:00前提交")
+    assert str(c["dt"]) == "2026-10-19 17:00:00" and c["dt_end"] is None and not c["has_end"]
+    c = one("10月19日 有一点难")                     # 「一点」不是 1:00
+    assert not c["has_time"]
+
+
+def test_range_not_inherited_by_next_date():
+    cands = ddl.extract_candidates("10月19日 14:00-15:30，10月20日 提交", SENT)
+    assert [ddl.read_as(c) for c in cands] == ["2026-10-19 14:00–15:30", "2026-10-20"]
+
+
+def test_nbsp_entity_is_cleaned():
+    assert rng("时间：&nbsp; &nbsp;&nbsp;10月20日，星期二，14:00-15:30 地点：") == "2026-10-20 14:00–15:30"
+
+
+def test_extract_place():
+    f = ddl.extract_place
+    assert f("时间：2026年10月19日（星期一），14:00-15:30　地点：大学会堂　语言：中文") == "大学会堂"
+    assert f("时间：10月19日 14:00 地点：大学会堂 语言：中文 请注意： 1、") == "大学会堂"
+    assert f("地点：&nbsp; &nbsp; T7-104 嘉宾简介： 嘉宾1") == "T7-104"
+    assert f("Venue: Room 101, Building A Language: English") == "Room 101, Building A"
+    assert f("Location: Lecture Hall. Thanks") == "Lecture Hall"
+    assert f("没有写地点这个字段，只有时间") == ""
+    assert f("Location: T3-501-R5 Please prepare a few questions") == "T3-501-R5"
+    assert f("Venue: Faculty Club (AD402) Registration: open from") == "Faculty Club (AD402)"
+    assert f("Venue: T4-203, Staff and Student Activity Centre (SSAC) Curious about") == "T4-203, Staff and Student Activity Centre (SSAC)"
+    assert f("地点：CC126 现场提供茶歇，欢迎各位师生") == "CC126"
+    assert f("地点：BNBU一期校园 T29-604 主讲人简介 James") == "BNBU一期校园 T29-604"
+    assert f("地点：Performance Stage ·周边领取与照片活动：") == "Performance Stage"
+
+
+def test_event_status():
+    st = datetime(2026, 10, 19, 14, 0)
+    en = datetime(2026, 10, 19, 15, 30)
+    f = ddl.event_status
+    assert f(None, None) == "none"
+    assert f(st, en, datetime(2026, 10, 19, 13, 59)) == "upcoming"
+    assert f(st, en, datetime(2026, 10, 19, 14, 0)) == "ongoing"
+    assert f(st, en, datetime(2026, 10, 19, 15, 19)) == "ongoing"          # Key 的截图：15:1x 还在进行
+    assert f(st, en, datetime(2026, 10, 19, 15, 30)) == "ended"
+    assert f(st, None, datetime(2026, 10, 19, 14, 59)) == "ongoing"        # 没有结束时间按 1 小时
+    assert f(st, None, datetime(2026, 10, 19, 15, 0)) == "ended"
+
+
 def test_status():
     assert ddl.status_of(None) == "none"
     assert ddl.status_of(datetime(2026, 1, 1), now=SENT) == "expired"
