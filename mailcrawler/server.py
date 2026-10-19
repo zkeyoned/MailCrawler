@@ -266,6 +266,7 @@ class H(BaseHTTPRequestHandler):
                     auto_sync=bool(body.get("auto_sync")))
         store.init_db()
         log_line("login ok: %s" % email_addr)
+        mailbox.start_sync(auto=False)   # 登录成功立刻开始第一轮同步，别让用户对着「等待同步」干等
         return self.send_json(setup_info())
 
     def _settings(self, body):
