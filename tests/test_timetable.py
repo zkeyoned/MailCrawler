@@ -169,3 +169,55 @@ def test_api_week_without_timetable_file(http, monkeypatch):
     code, r = http("/api/week?start=2026-10-19")
     assert code == 200 and r["timetable"]["exists"] is False and r["timetable"]["occurrences"] == []
     assert {i["uid"] for i in r["items"]} == {1, 2}
+
+
+def test_normalize_subject():
+    n = timetable.normalize_subject
+    assert n("Reminder: 数据结构讲座") == "数据结构讲座"
+    assert n("  【Reminder】海洋讲座 ") == "海洋讲座"
+    assert n("[Reminder] 海洋讲座") == "海洋讲座" and n("Reminder 海洋讲座") == "海洋讲座"
+    assert n("提醒：海洋讲座") == "海洋讲座" and n("提醒: 海洋讲座") == "海洋讲座"
+    assert n("RE: Re: 转发：Fwd: 海洋讲座") == "海洋讲座"       # 前缀可叠加
+    assert n("Reminder: Re: 提醒：海洋讲座") == "海洋讲座"
+    assert n("Reminders of things") == "Reminders of things"    # 不误伤以 Reminder 开头的单词
+    assert n("Research seminar") == "Research seminar"
+
+
+def _it(uid, subj, dl, stars, cat="event", ignored=False):
+    return {"uid": uid, "subject": subj, "deadline": dl, "stars": stars, "cat": cat, "ignored": ignored}
+
+
+def test_week_filter_exclusions_and_dedup():
+    items = [
+        _it(1, "AI 讲座", "2026-10-20 15:00", 4),
+        _it(2, "Reminder: AI 讲座", "2026-10-20 10:00", 4),         # 同星级、时间更早 → 留这条
+        _it(3, "提醒：AI 讲座", "2026-10-20 09:00", 3),              # 星级低 → 丢
+        _it(4, "【Reminder】AI 讲座", "2026-10-21 15:00", 4),        # 另一天 → 各留一条
+        _it(5, "发件人已撤回：某活动", "2026-10-20 16:00", 5),        # 撤回 → 永远排除
+        _it(6, "Re: 发件人已撤回：某活动", "2026-10-20 16:00", 5),
+        _it(7, "系统通知", "2026-10-20 12:00", 5, cat="automated"),
+        _it(8, "被忽略发件人", "2026-10-20 12:30", 5, ignored=True),
+        _it(9, "ignored 类别", "2026-10-20 12:40", 5, cat="ignored"),
+        _it(10, "另一个活动", "2026-10-20 13:00", 2),
+        _it(11, "Fwd: ai 讲座", "2026-10-20 08:00", 5),              # 大小写不敏感、星级最高 → 压过 2、1、3
+    ]
+    out = timetable.week_filter(items)
+    assert [i["uid"] for i in out] == [11, 10, 4]
+    # 同星级时取时间最早
+    out = timetable.week_filter([_it(1, "AI 讲座", "2026-10-20 15:00", 4), _it(2, "Reminder: AI 讲座", "2026-10-20 10:00", 4)])
+    assert [i["uid"] for i in out] == [2]
+    # 没星级（None）排最后
+    out = timetable.week_filter([_it(1, "X", "2026-10-20 10:00", None), _it(2, "Re: X", "2026-10-20 11:00", 1)])
+    assert [i["uid"] for i in out] == [2]
+
+
+def test_api_week_filters_and_dedups(http):
+    for uid, subj, cat, imp, dl in [(10, "Reminder: 与常微分冲突的讲座", "event", 3, "2026-10-19 10:30"),
+                                     (11, "发件人已撤回：讲座", "event", 5, "2026-10-20 10:00"),
+                                     (12, "系统通知", "automated", 5, "2026-10-20 11:00")]:
+        store.insert_emails([(uid, "2026-10-01 10:00:00", "a@b.c", subj, "正文", 0, "x")])
+        store.save_triage(uid, cat, 0.9, 0.8, dl, "", 0.9, {}, importance=imp, imp_conf=0.9)
+    code, w = http("/api/week?start=2026-10-19")
+    assert code == 200
+    assert [i["uid"] for i in w["items"]] == [1, 2]        # 10 是 1 的 Reminder 重复（星级低）、11 撤回、12 自动通知；3 在下一周
+    assert w["items"][0]["conflicts"][0]["name"] == "常微分方程"

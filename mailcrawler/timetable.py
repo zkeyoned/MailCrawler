@@ -154,10 +154,47 @@ def payload(frm, to):
     return {"exists": True, "error": "", "semester": sem, "courses": course_meta(tt), "occurrences": occ, "holidays": hol}
 
 
+# 去重时要剥掉的前缀（循环剥，大小写不敏感）：Reminder / 【Reminder】 / [Reminder] / 提醒： / Re: / Fwd: / 转发：
+_PREFIX = re.compile(r"^\s*(?:\[\s*reminder\s*\]|【\s*reminder\s*】|reminder\b\s*[:：]?|提醒\s*[:：]|re\s*[:：]|fwd?\s*[:：]|转发\s*[:：])\s*",
+                     re.IGNORECASE)
+RECALLED = "发件人已撤回"
+
+
+def normalize_subject(subject):
+    """去掉 Reminder:/提醒：/Re:/Fwd:/转发： 等前缀和首尾空白（前缀可叠加），用来判断「同一个活动的重复邮件」。"""
+    s = str(subject or "").strip()
+    while True:
+        t = _PREFIX.sub("", s, count=1).strip()
+        if t == s:
+            return s
+        s = t
+
+
+def week_filter(items):
+    """周视图/议程用的默认过滤（永远生效，不受前端开关影响）：
+    排除 系统自动通知 / 被忽略发件人命中的 / 主题以「发件人已撤回」开头的；
+    同一天同一标准化主题只留一条：星级最高、时间最早（再按 uid）。"""
+    best = {}
+    for it in items:
+        subj = str(it.get("subject") or "").strip()
+        if it.get("cat") in ("automated", "ignored") or it.get("ignored"):
+            continue
+        if subj.startswith(RECALLED) or normalize_subject(subj).startswith(RECALLED):
+            continue
+        key = (str(it["deadline"])[:10], normalize_subject(subj).casefold())
+        rank = (-(it.get("stars") or 0), str(it["deadline"]), it.get("uid") or 0)
+        if key not in best or rank < best[key][0]:
+            best[key] = (rank, it)
+    out = [v[1] for v in best.values()]
+    out.sort(key=lambda i: (str(i["deadline"]), i.get("uid") or 0))
+    return out
+
+
 def week_payload(start):
-    """/api/week：一周（start 起 7 天）的课程、假期、邮件条目（含冲突）。不做星级/过期筛选，由前端按开关筛。"""
+    """/api/week：一周（start 起 7 天）的课程、假期、邮件条目（含冲突）。
+    条目已按 week_filter 去掉自动通知/忽略/撤回并去重；星级和过期筛选仍由前端按开关做。"""
     end = start + timedelta(days=6)
     tt = payload(start, end)
-    items = store.calendar_items(start.isoformat(), end.isoformat())
+    items = week_filter(store.calendar_items(start.isoformat(), end.isoformat()))
     classify_and_annotate(items, tt["occurrences"])
     return {"start": start.isoformat(), "end": end.isoformat(), "timetable": tt, "items": items}

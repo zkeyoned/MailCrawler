@@ -586,6 +586,7 @@
     $('#calview').hidden = !cal;
     $('#listview').hidden = crawl || cal;
     renderSide();
+    if (!cal) Cal.leave();
     if (cal) {
       Cal.enter();
     } else if (crawl) {
@@ -785,13 +786,36 @@
     items: [],            // 月历范围内全部条目（未筛选）
     upcoming: [],         // 今天起 14 天（未筛选）
     wk: null,             // /api/week 的结果
-    min3: lsGet('mc_cal_min3') === '1',
+    min3: lsGet('mc_cal_min3') !== '0',   // 默认只看 ≥3 星
     hideExp: lsGet('mc_cal_hideexp') === '1',
     gridFrom: '', gridTo: '',
     seq: 0,
     timer: 0,
     scrolledFor: '',
     ttWarned: false,
+    autoFolded: false,    // 周视图为了让每列够宽，自动折叠了左侧栏（离开日历时还原）
+
+    // 保证周视图每列 ≥120px：先试议程栏 320px，不够缩到 280px，还不够就自动折叠左侧栏
+    fit() {
+      const cv = $('#calview');
+      const userFolded = document.body.classList.contains('collapsed') && !this.autoFolded;
+      const sbw = userFolded ? 0 : 240;
+      const colW = agw => (window.innerWidth - sbw - 36 - 18 - agw - 2 - 46) / 7;
+      let agw = 320, fold = false;
+      if (this.mode === 'week') {
+        if (colW(320) >= 120) agw = 320;
+        else if (colW(280) >= 120) agw = 280;
+        else if (sbw > 0) { fold = true; agw = 320; }
+        else agw = 280;
+      }
+      if (fold && !document.body.classList.contains('collapsed')) { document.body.classList.add('collapsed'); this.autoFolded = true; }
+      else if (!fold && this.autoFolded) { document.body.classList.remove('collapsed'); this.autoFolded = false; }
+      cv.style.setProperty('--agw', agw + 'px');
+    },
+    leave() {
+      if (this.autoFolded) { document.body.classList.remove('collapsed'); this.autoFolded = false; setTimeout(layoutAll, 260); }
+      clearInterval(this.timer);
+    },
 
     enter() {
       const t = new Date();
@@ -801,6 +825,7 @@
       $('#cal-hideexp').checked = this.hideExp;
       $('#cal-export').replaceChildren(ico('dl'));
       this.applyMode();
+      this.fit();
       this.load();
       clearInterval(this.timer);
       this.timer = setInterval(() => { if (S.view === 'calendar') this.load(); else clearInterval(this.timer); }, 20000);
@@ -835,6 +860,7 @@
       this.mode = m;
       lsSet('mc_cal_mode', m);
       this.applyMode();
+      this.fit();
       this.load();
     },
     load() { return this.mode === 'week' ? this.loadWeek() : this.loadMonth(); },
@@ -870,12 +896,38 @@
       }
       this.renderWeek();
     },
-    dueChip(m) {
-      const c = el('div', 'duechip' + (m.ddl_status === 'expired' ? ' exp' : ''));
-      c.append(ico('warn'), el('span', '', m.subject || '(无主题)'));
-      c.title = '截止 ' + fmtDdl(m.deadline) + '\n' + (m.subject || '') + (m.ddl_status === 'expired' ? '\n已过期' : '');
+    // 悬停小提示（周视图邮件竖条用）
+    tip(node, lines) {
+      let t = $('#wktip');
+      if (!t) { t = el('div'); t.id = 'wktip'; t.hidden = true; document.body.append(t); }
+      node.addEventListener('mouseenter', () => {
+        t.replaceChildren(...lines.map((s, i) => el('div', i === 0 ? 'tt' : i === 1 ? 'tm' : 'cf', s)));
+        t.hidden = false;
+        const r = node.getBoundingClientRect(), tr = t.getBoundingClientRect();
+        t.style.left = (r.left - tr.width - 8 >= 8 ? r.left - tr.width - 8 : r.right + 8) + 'px';
+        t.style.top = Math.max(8, Math.min(window.innerHeight - tr.height - 8, r.top)) + 'px';
+      });
+      node.addEventListener('mouseleave', () => { t.hidden = true; });
+    },
+    // 截止栏：每天最多 1 个标签（星级最高，同星取时间最早），其余合并成 +N，点 +N 议程滚到那天
+    dueCell(list, k) {
+      const sorted = list.slice().sort((a, b) => (b.stars || 0) - (a.stars || 0) || a.deadline.localeCompare(b.deadline));
+      const m = sorted[0];
+      const c = el('div', 'duechip' + (m.ddl_status === 'expired' ? ' exp' : ''), m.subject || '(无主题)');
+      c.title = '截止 ' + fmtDdl(m.deadline) + (m.stars ? ' · ★' + m.stars : '') + '\n' + (m.subject || '') + (m.ddl_status === 'expired' ? '\n已过期' : '');
       c.addEventListener('click', () => openDrawer(m.uid));
-      return c;
+      const nodes = [c];
+      if (sorted.length > 1) {
+        const more = el('button', 'duemore', '+' + (sorted.length - 1));
+        more.title = '这天还有 ' + (sorted.length - 1) + ' 个截止，点击在右侧议程里查看';
+        more.addEventListener('click', () => {
+          const g = document.querySelector('#wkagenda .agday[data-day="' + k + '"]');
+          if (g) { g.scrollIntoView({ behavior: 'smooth', block: 'start' }); g.classList.add('flash'); setTimeout(() => g.classList.remove('flash'), 1200); }
+          else toast('这一天已经过去，议程里不再列出', false);
+        });
+        nodes.push(more);
+      }
+      return nodes;
     },
     courseBlock(o, h, past) {
       const b = el('div', 'wkblk course' + (past ? ' past' : '') + (h < 46 ? ' short' : ''));
@@ -891,26 +943,15 @@
       b.title = o.name + (o.code ? '（' + o.code + '）' : '') + '\n' + o.start + '–' + o.end + (o.room ? '  ' + o.room : '') + (o.teacher ? '\n' + o.teacher : '');
       return b;
     },
-    mailBlock(m, h) {
+    // 邮件活动：不画成块，只在该时段、该天列的右边缘画一条 4px 竖条（类别色；与课冲突=红色）
+    mailStrip(m, hpx) {
       const conf = (m.conflicts || []).length > 0;
-      const b = el('div', 'wkblk mail' + (m.ddl_status === 'expired' ? ' exp' : '') + (conf ? ' hasconf' : '') + (h < 46 ? ' short' : ''));
-      b.style.setProperty('--cc', CAT_COLOR[m.cat] || '#8794a8');
-      const bt = el('div', 'bt');
-      bt.append(ico('mail'), el('span', '', m.subject || '(无主题)'));
-      b.append(bt);
-      if (h >= 40) {
-        const bm = el('div', 'bm');
-        bm.append(el('span', '', m.deadline.slice(11, 16) + '–' + m.end_time));
-        const d = this.dots(m.stars);
-        if (d) bm.append(d);
-        b.append(bm);
-      }
-      if (conf) {
-        const cf = el('div', 'conf');
-        cf.append(ico('warn'));
-        b.append(cf);
-      }
-      b.title = (m.subject || '') + '\n' + fmtDdl(m.deadline) + ' · ' + (m.cat_zh || '') + (conf ? '\n⚠ ' + this.conflictText(m) : '') + (m.ddl_status === 'expired' ? '\n已过期' : '');
+      const b = el('div', 'wkstrip' + (m.ddl_status === 'expired' ? ' exp' : '') + (conf ? ' hasconf' : ''));
+      b.style.setProperty('--cc', conf ? 'var(--due)' : (CAT_COLOR[m.cat] || '#8794a8'));
+      b.style.height = hpx + 'px';
+      const lines = [m.subject || '(无主题)', m.deadline.slice(11, 16) + '–' + m.end_time + (m.stars ? ' · ★' + m.stars : '') + (m.ddl_status === 'expired' ? ' · 已过期' : '')];
+      if (conf) lines.push(this.conflictText(m));
+      this.tip(b, lines);
       b.addEventListener('click', () => openDrawer(m.uid));
       return b;
     },
@@ -949,7 +990,7 @@
       });
       $('#wkhead').replaceChildren(...head);
 
-      // ---- 截止栏
+      // ---- 截止栏（固定一行；这周没有截止就整栏隐藏）
       const dueRow = $('#wkdue');
       const anyDue = keys.some(k => (dueBy[k] || []).length);
       dueRow.hidden = !anyDue;
@@ -957,13 +998,13 @@
         const cells = [el('div', '', '截止')];
         keys.forEach(k => {
           const c = el('div', (k === today ? 'today' : '') + (hol[k] ? ' hol' : ''));
-          for (const m of dueBy[k] || []) c.append(this.dueChip(m));
+          if ((dueBy[k] || []).length) c.append(...this.dueCell(dueBy[k], k));
           cells.push(c);
         });
         dueRow.replaceChildren(...cells);
       }
 
-      // ---- 时间网格
+      // ---- 时间网格：只画课程（占满整列）；邮件活动是右边缘的竖条
       const gut = el('div', 'wkgut');
       gut.style.height = (gridH + PAD * 2) + 'px';
       for (let h = gs; h <= 24; h++) {
@@ -972,7 +1013,7 @@
         gut.append(i);
       }
       const cols = [gut];
-      keys.forEach((k, di) => {
+      keys.forEach(k => {
         const col = el('div', 'wkcol' + (k === today ? ' today' : '') + (hol[k] ? ' hol' : '') + (k < today ? ' past' : ''));
         col.style.height = (gridH + PAD * 2) + 'px';
         col.style.backgroundPosition = '0 ' + PAD + 'px';
@@ -981,20 +1022,25 @@
           hd.append(ico('sun'), el('span', '', hol[k] + (/假/.test(hol[k]) ? '' : ' 假期')));
           col.append(hd);
         }
-        const blks = [];
-        for (const o of occBy[k] || []) blks.push({ s: hmMin(o.start), e: hmMin(o.end), course: o });
-        for (const m of evBy[k] || []) blks.push({ s: hmMin(m.deadline.slice(11, 16)), e: hmMin(m.end_time), mail: m });
-        layoutLanes(blks);
-        for (const b of blks) {
-          const hpx = Math.max((b.e - b.s) / 60 * HP - 2, 20);
-          const node = b.course ? this.courseBlock(b.course, hpx, k === today && b.e <= nowMin || k < today) : this.mailBlock(b.mail, hpx);
-          node.style.top = topOf(b.s) + 'px';
+        // 竖条的并排道数决定课程块右边留多宽（一般 1 道：留 9px）
+        const strips = layoutLanes((evBy[k] || []).map(m => ({ s: hmMin(m.deadline.slice(11, 16)), e: hmMin(m.end_time), mail: m })));
+        const lanes = strips.reduce((n, b) => Math.max(n, b.lanes), 1);
+        const reserve = 3 + lanes * 6;
+        for (const o of occBy[k] || []) {
+          const s = hmMin(o.start), e = hmMin(o.end);
+          const hpx = Math.max((e - s) / 60 * HP - 2, 20);
+          const node = this.courseBlock(o, hpx, k < today || (k === today && e <= nowMin));
+          node.style.top = topOf(s) + 'px';
           node.style.height = hpx + 'px';
-          // 重叠的块不平分宽度（列太窄字会挤没），而是错位叠放：后面的向右缩进一截、盖在前面上面
-          const step = b.lanes > 2 ? 16 : 26;
-          node.style.left = 'calc(' + (b.lane * step) + '% + 2px)';
-          node.style.width = 'calc(' + (100 - step * (b.lanes - 1)) + '% - 4px)';
-          node.style.zIndex = 2 + b.lane;
+          node.style.left = '3px';
+          node.style.right = reserve + 'px';
+          col.append(node);
+        }
+        for (const b of strips) {
+          const hpx = Math.max((b.e - b.s) / 60 * HP - 2, 16);
+          const node = this.mailStrip(b.mail, hpx);
+          node.style.top = topOf(b.s) + 'px';
+          node.style.right = (2 + b.lane * 6) + 'px';
           col.append(node);
         }
         if (k === today && nowMin >= gs * 60) {
@@ -1015,12 +1061,19 @@
       }
       this.renderAgenda(days, keys, hol, occBy, evBy, dueBy, today, nowMin);
     },
-    card(kind, o, past) {
+    card(kind, past) {
       const c = el('div', 'agcard ' + kind + (kind !== 'course' && kind !== 'holc' ? ' click' : '') + (past ? ' past' : ''));
       c.append(el('div', 'agbar'));
       const body = el('div', 'agbody');
       c.append(body);
       return [c, body];
+    },
+    // 第三行：左边地点/类别（省略号），右下角文字星级 ★4
+    agRow3(left, stars) {
+      const r3 = el('div', 'agr3');
+      r3.append(el('span', 'rm', left || ''));
+      if (stars) r3.append(el('span', 'agstar', '★' + stars));
+      return r3;
     },
     renderAgenda(days, keys, hol, occBy, evBy, dueBy, today, nowMin) {
       const box = $('#wkagenda');
@@ -1035,64 +1088,41 @@
         for (const m of evBy[k] || []) entries.push({ t: hmMin(m.deadline.slice(11, 16)), mail: m });
         for (const m of dueBy[k] || []) entries.push({ t: 24 * 60, due: m });
         if (!entries.length && !hol[k]) return;
-        entries.sort((a, b) => a.t - b.t);
+        entries.sort((a, b) => a.t - b.t || (b.due ? (a.due ? (b.due.stars || 0) - (a.due.stars || 0) : -1) : 0));
         const g = el('div', 'agday');
+        g.dataset.day = k;
         const d = days[i];
         const isToday = k === today;
         const h = el('div', 'agh' + (isToday ? ' today' : ''), '周' + WEEK_ZH[d.getDay()] + ' ' + (d.getMonth() + 1) + '/' + d.getDate());
         if (isToday) h.append(el('span', 'tag', '今天'));
         g.append(h);
         if (hol[k]) {
-          const [c, b] = this.card('holc', null, false);
-          const r1 = el('div', 'agr1');
-          r1.append(ico('sun'), document.createTextNode('假期'));
-          b.append(r1, el('div', 'agr2', hol[k] + (/假/.test(hol[k]) ? '' : ' 假期')));
+          const [c, b] = this.card('holc', false);
+          b.append(el('div', 'agr2', hol[k] + (/假/.test(hol[k]) ? '' : ' 假期')));
           g.append(c);
         }
         for (const e of entries) {
           if (e.course) {
             const o = e.course;
-            const [c, b] = this.card('course', o, k < today || (isToday && hmMin(o.end) <= nowMin));
+            const [c, b] = this.card('course', k < today || (isToday && hmMin(o.end) <= nowMin));
             c.style.setProperty('--cc', this.courseColor(o.course_index));
-            const r1 = el('div', 'agr1');
-            r1.append(ico('clock'), document.createTextNode(o.start + ' - ' + o.end));
-            const r3 = el('div', 'agr3');
-            if (o.room) { r3.append(ico('pin'), el('span', 'rm', o.room)); }
-            if (o.teacher) r3.append(el('span', 'agt', o.teacher));
-            b.append(r1, el('div', 'agr2', o.name));
-            if (o.room || o.teacher) b.append(r3);
+            b.append(el('div', 'agr1', o.start + ' - ' + o.end), el('div', 'agr2', o.name));
+            if (o.room) b.append(this.agRow3(o.room, 0));
             g.append(c);
           } else if (e.mail) {
             const m = e.mail;
-            const [c, b] = this.card('mail', m, m.ddl_status === 'expired');
+            const [c, b] = this.card('mail', m.ddl_status === 'expired');
             c.style.setProperty('--cc', CAT_COLOR[m.cat] || '#8794a8');
             const r1 = el('div', 'agr1');
-            r1.append(ico('clock'), document.createTextNode(m.deadline.slice(11, 16) + ' - ' + m.end_time), el('span', 'gap'), ico('mail'));
-            const r3 = el('div', 'agr3');
-            const pill = el('span', 'pill');
-            const dot = el('i'); dot.style.background = CAT_COLOR[m.cat] || '#888';
-            pill.append(dot, el('span', 'rm', m.cat_zh || m.cat || ''));
-            r3.append(pill);
-            const se = starsEl(m.stars, m.importance);
-            if (se) { se.style.marginLeft = 'auto'; r3.append(se); }
-            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), r3);
-            if ((m.conflicts || []).length) {
-              const w = el('div', 'agwarn');
-              w.append(ico('warn'), el('span', '', this.conflictText(m)));
-              b.append(w);
-            }
+            r1.append(ico('mail'), document.createTextNode(m.deadline.slice(11, 16) + ' - ' + m.end_time));
+            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), this.agRow3(m.cat_zh || m.cat, m.stars));
+            if ((m.conflicts || []).length) b.append(el('div', 'agwarn', this.conflictText(m)));
             c.addEventListener('click', () => openDrawer(m.uid));
             g.append(c);
           } else {
             const m = e.due;
-            const [c, b] = this.card('due', m, m.ddl_status === 'expired');
-            const r1 = el('div', 'agr1');
-            r1.append(ico('warn'), document.createTextNode(fmtDdl(m.deadline)));
-            const r3 = el('div', 'agr3');
-            r3.append(el('span', 'rm', m.cat_zh || m.cat || ''));
-            const se = starsEl(m.stars, m.importance);
-            if (se) { se.style.marginLeft = 'auto'; r3.append(se); }
-            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), r3);
+            const [c, b] = this.card('due', m.ddl_status === 'expired');
+            b.append(el('div', 'agr1', '当天截止'), el('div', 'agr2', m.subject || '(无主题)'), this.agRow3(m.cat_zh || m.cat, m.stars));
             c.addEventListener('click', () => openDrawer(m.uid));
             g.append(c);
           }
@@ -1586,7 +1616,8 @@
   }
   function bind() {
     $('#btn-crawl').onclick = newRound;
-    $('#btn-fold').onclick = () => { document.body.classList.toggle('collapsed'); setTimeout(layoutAll, 260); };
+    $('#btn-fold').onclick = () => { Cal.autoFolded = false; document.body.classList.toggle('collapsed'); setTimeout(layoutAll, 260); };
+    window.addEventListener('resize', () => { if (S.view === 'calendar') Cal.fit(); });
     $('#btn-search').onclick = () => {
       const b = $('#searchbox');
       b.hidden = !b.hidden;

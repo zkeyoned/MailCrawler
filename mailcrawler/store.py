@@ -219,7 +219,7 @@ def calendar_items(frm, to, min_stars=None, hide_expired=False, limit=2000):
     if to:
         where.append("substr(t.deadline,1,10)<=?")
         p.append(to)
-    sql = ("SELECT e.uid,e.date,e.sender,e.subject,t.cat,t.action,t.deadline,t.deadline_text,t.importance "
+    sql = ("SELECT e.uid,e.date,e.sender,e.subject,t.cat,t.action,t.deadline,t.deadline_text,t.importance,t.ignored "
            "FROM emails e JOIN triage t ON e.uid=t.uid WHERE " + " AND ".join(where) +
            " ORDER BY t.deadline, e.uid LIMIT ?")
     with DB_LOCK, db() as c:
@@ -231,6 +231,7 @@ def calendar_items(frm, to, min_stars=None, hide_expired=False, limit=2000):
         if dt is None:
             continue
         d["ddl_status"] = ddl.status_of(dt, now)
+        d["ignored"] = bool(d.get("ignored"))
         d["stars"] = stars_of(d["importance"])
         d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
         d["has_time"] = has_clock_time(d["deadline"])
