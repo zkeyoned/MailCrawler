@@ -740,25 +740,371 @@
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 存不了就算了 */ } }
 
+  // ------------------------------------------------------------ 小图标（常量 SVG，不含邮件内容）
+  const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+  const ICONS = {
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    pin: '<path d="M12 21s-7-6.2-7-11a7 7 0 0114 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+    warn: '<path d="M12 3.5l10 17.5H2z"/><path d="M12 10v5M12 18h.01"/>',
+    mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
+    dl: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'
+  };
+  const icoTpl = document.createElement('template');
+  function ico(name) {
+    icoTpl.innerHTML = SVG_OPEN + ICONS[name] + '</svg>';
+    return icoTpl.content.firstChild.cloneNode(true);
+  }
+  const mondayOf = d => new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
+  const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  const hmMin = s => { const m = /^(\d{1,2}):(\d{2})/.exec(s || ''); return m ? +m[1] * 60 + +m[2] : 0; };
+  const DOW_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const HP = 56, PAD = 8;     // 一小时的像素高度；网格上下留白
+
+  // 把重叠的块排成并排的几列：返回时每块带 lane / lanes
+  function layoutLanes(blks) {
+    blks.sort((a, b) => a.s - b.s || b.e - a.e);
+    let cluster = [], laneEnds = [], clusterEnd = -1;
+    const flush = () => { for (const b of cluster) b.lanes = laneEnds.length; };
+    for (const b of blks) {
+      if (cluster.length && b.s >= clusterEnd) { flush(); cluster = []; laneEnds = []; clusterEnd = -1; }
+      let l = laneEnds.findIndex(e => e <= b.s);
+      if (l < 0) { l = laneEnds.length; laneEnds.push(0); }
+      laneEnds[l] = b.e; b.lane = l;
+      cluster.push(b); clusterEnd = Math.max(clusterEnd, b.e);
+    }
+    flush();
+    return blks;
+  }
+
   const Cal = {
+    mode: lsGet('mc_cal_mode') === 'month' ? 'month' : 'week',
+    weekStart: null,      // 当前周的周一（Date）
     month: null,          // 当月 1 号（Date）
-    sel: '',              // 选中的日期 YYYY-MM-DD
+    sel: '',              // 月视图选中的日期 YYYY-MM-DD
     items: [],            // 月历范围内全部条目（未筛选）
     upcoming: [],         // 今天起 14 天（未筛选）
+    wk: null,             // /api/week 的结果
     min3: lsGet('mc_cal_min3') === '1',
     hideExp: lsGet('mc_cal_hideexp') === '1',
     gridFrom: '', gridTo: '',
     seq: 0,
     timer: 0,
+    scrolledFor: '',
+    ttWarned: false,
 
     enter() {
-      if (!this.month) { const t = new Date(); this.month = new Date(t.getFullYear(), t.getMonth(), 1); }
+      const t = new Date();
+      if (!this.month) this.month = new Date(t.getFullYear(), t.getMonth(), 1);
+      if (!this.weekStart) this.weekStart = mondayOf(t);
       $('#cal-min3').checked = this.min3;
       $('#cal-hideexp').checked = this.hideExp;
+      $('#cal-export').replaceChildren(ico('dl'));
+      this.applyMode();
       this.load();
       clearInterval(this.timer);
       this.timer = setInterval(() => { if (S.view === 'calendar') this.load(); else clearInterval(this.timer); }, 20000);
     },
+    applyMode() {
+      const wk = this.mode === 'week';
+      $('#calweek').hidden = !wk;
+      $('#calmonth').hidden = wk;
+      for (const b of $('#cal-mode').children) b.classList.toggle('on', b.dataset.mode === this.mode);
+      $('#cal-prev').title = wk ? '上一周' : '上个月';
+      $('#cal-next').title = wk ? '下一周' : '下个月';
+      this.updateTitle();
+    },
+    updateTitle() {
+      if (this.mode === 'week') {
+        const a = this.weekStart, b = addDays(a, 6);
+        $('#cal-title').textContent = (a.getMonth() + 1) + '/' + a.getDate() + ' - ' + (b.getMonth() + 1) + '/' + b.getDate();
+      } else {
+        $('#cal-title').textContent = this.month.getFullYear() + '年' + (this.month.getMonth() + 1) + '月';
+      }
+    },
+    setMode(m) {
+      if (m === this.mode) return;
+      if (m === 'month') {
+        const d = this.sel ? parseYmd(this.sel) : this.weekStart;
+        this.month = new Date(d.getFullYear(), d.getMonth(), 1);
+      } else {
+        const t = new Date();
+        const cur = this.month.getFullYear() === t.getFullYear() && this.month.getMonth() === t.getMonth();
+        this.weekStart = mondayOf(this.sel ? parseYmd(this.sel) : (cur ? t : this.month));
+      }
+      this.mode = m;
+      lsSet('mc_cal_mode', m);
+      this.applyMode();
+      this.load();
+    },
+    load() { return this.mode === 'week' ? this.loadWeek() : this.loadMonth(); },
+    render() { if (this.mode === 'week') this.renderWeek(); else this.renderMonth(); },
+    visible(m) {
+      if (this.hideExp && m.ddl_status === 'expired') return false;
+      if (this.min3 && !(m.stars >= 3)) return false;
+      return true;
+    },
+    timeText(m) { return m.has_time ? m.deadline.slice(11, 16) : '全天'; },
+    dots(n) {
+      if (!n) return null;
+      const d = el('span', 'dots s' + n, '●'.repeat(n));
+      d.title = n + ' 星 · ' + STAR_ZH[n];
+      return d;
+    },
+    courseColor(i) { return 'var(--c' + (i % 8) + ')'; },
+    // 冲突提示文字：与《课程名》冲突 N 分钟
+    conflictText(m) { return (m.conflicts || []).map(c => '与《' + c.name + '》冲突 ' + c.minutes + ' 分钟').join('；'); },
+
+    // ================= 周视图 =================
+    async loadWeek() {
+      const my = ++this.seq;
+      this.updateTitle();
+      try {
+        const w = await api('/api/week?start=' + ymd(this.weekStart));
+        if (my !== this.seq) return;
+        this.wk = w;
+        if (w.timetable && w.timetable.error && !this.ttWarned) { this.ttWarned = true; toast(w.timetable.error, true); }
+      } catch (e) {
+        if (my === this.seq) toast('加载日历失败：' + e.message, true);
+        return;
+      }
+      this.renderWeek();
+    },
+    dueChip(m) {
+      const c = el('div', 'duechip' + (m.ddl_status === 'expired' ? ' exp' : ''));
+      c.append(ico('warn'), el('span', '', m.subject || '(无主题)'));
+      c.title = '截止 ' + fmtDdl(m.deadline) + '\n' + (m.subject || '') + (m.ddl_status === 'expired' ? '\n已过期' : '');
+      c.addEventListener('click', () => openDrawer(m.uid));
+      return c;
+    },
+    courseBlock(o, h, past) {
+      const b = el('div', 'wkblk course' + (past ? ' past' : '') + (h < 46 ? ' short' : ''));
+      b.style.setProperty('--cc', this.courseColor(o.course_index));
+      b.append(el('div', 'bt', o.name));
+      if (h >= 40) {
+        const bm = el('div', 'bm');
+        const tm = o.start + '–' + o.end;
+        if (h < 84 && o.room) bm.append(el('span', '', tm + ' · ' + o.room));
+        else { bm.append(el('span', '', tm)); if (o.room) bm.append(el('span', '', o.room)); }
+        b.append(bm);
+      }
+      b.title = o.name + (o.code ? '（' + o.code + '）' : '') + '\n' + o.start + '–' + o.end + (o.room ? '  ' + o.room : '') + (o.teacher ? '\n' + o.teacher : '');
+      return b;
+    },
+    mailBlock(m, h) {
+      const conf = (m.conflicts || []).length > 0;
+      const b = el('div', 'wkblk mail' + (m.ddl_status === 'expired' ? ' exp' : '') + (conf ? ' hasconf' : '') + (h < 46 ? ' short' : ''));
+      b.style.setProperty('--cc', CAT_COLOR[m.cat] || '#8794a8');
+      const bt = el('div', 'bt');
+      bt.append(ico('mail'), el('span', '', m.subject || '(无主题)'));
+      b.append(bt);
+      if (h >= 40) {
+        const bm = el('div', 'bm');
+        bm.append(el('span', '', m.deadline.slice(11, 16) + '–' + m.end_time));
+        const d = this.dots(m.stars);
+        if (d) bm.append(d);
+        b.append(bm);
+      }
+      if (conf) {
+        const cf = el('div', 'conf');
+        cf.append(ico('warn'));
+        b.append(cf);
+      }
+      b.title = (m.subject || '') + '\n' + fmtDdl(m.deadline) + ' · ' + (m.cat_zh || '') + (conf ? '\n⚠ ' + this.conflictText(m) : '') + (m.ddl_status === 'expired' ? '\n已过期' : '');
+      b.addEventListener('click', () => openDrawer(m.uid));
+      return b;
+    },
+    renderWeek() {
+      const w = this.wk;
+      if (!w) return;
+      this.updateTitle();
+      const ws = this.weekStart;
+      const days = [0, 1, 2, 3, 4, 5, 6].map(i => addDays(ws, i));
+      const keys = days.map(ymd);
+      const now = new Date(), today = ymd(now), nowMin = now.getHours() * 60 + now.getMinutes();
+      const tt = w.timetable || {};
+      const hol = {};
+      for (const h of tt.holidays || []) hol[h.date] = h.label;
+      const occBy = {}, evBy = {}, dueBy = {};
+      for (const o of tt.occurrences || []) (occBy[o.date] = occBy[o.date] || []).push(o);
+      const vis = (w.items || []).filter(m => this.visible(m));
+      for (const m of vis) {
+        const k = m.deadline.slice(0, 10);
+        ((m.kind === 'event' ? evBy : dueBy)[k] = (m.kind === 'event' ? evBy : dueBy)[k] || []).push(m);
+      }
+      // 网格起点：默认 8 点，有更早的课/活动就往前扩
+      let gs = 8;
+      for (const o of tt.occurrences || []) gs = Math.min(gs, Math.floor(hmMin(o.start) / 60));
+      for (const m of vis) if (m.kind === 'event') gs = Math.min(gs, Math.floor(hmMin(m.deadline.slice(11, 16)) / 60));
+      const gridH = (24 - gs) * HP;
+      $('#calview').style.setProperty('--hp', HP + 'px');
+      const topOf = min => PAD + (min - gs * 60) / 60 * HP;
+
+      // ---- 列头
+      const head = [el('div', 'wkh')];
+      keys.forEach((k, i) => {
+        const h = el('div', 'wkh' + (k === today ? ' today' : '') + (hol[k] ? ' hol' : ''));
+        h.append(el('b', '', DOW_EN[days[i].getDay()]), el('span', '', (days[i].getMonth() + 1) + '/' + days[i].getDate()));
+        head.push(h);
+      });
+      $('#wkhead').replaceChildren(...head);
+
+      // ---- 截止栏
+      const dueRow = $('#wkdue');
+      const anyDue = keys.some(k => (dueBy[k] || []).length);
+      dueRow.hidden = !anyDue;
+      if (anyDue) {
+        const cells = [el('div', '', '截止')];
+        keys.forEach(k => {
+          const c = el('div', (k === today ? 'today' : '') + (hol[k] ? ' hol' : ''));
+          for (const m of dueBy[k] || []) c.append(this.dueChip(m));
+          cells.push(c);
+        });
+        dueRow.replaceChildren(...cells);
+      }
+
+      // ---- 时间网格
+      const gut = el('div', 'wkgut');
+      gut.style.height = (gridH + PAD * 2) + 'px';
+      for (let h = gs; h <= 24; h++) {
+        const i = el('i', '', pad2(h) + ':00');
+        i.style.top = (PAD + (h - gs) * HP) + 'px';
+        gut.append(i);
+      }
+      const cols = [gut];
+      keys.forEach((k, di) => {
+        const col = el('div', 'wkcol' + (k === today ? ' today' : '') + (hol[k] ? ' hol' : '') + (k < today ? ' past' : ''));
+        col.style.height = (gridH + PAD * 2) + 'px';
+        col.style.backgroundPosition = '0 ' + PAD + 'px';
+        if (hol[k]) {
+          const hd = el('div', 'wkhol');
+          hd.append(ico('sun'), el('span', '', hol[k] + (/假/.test(hol[k]) ? '' : ' 假期')));
+          col.append(hd);
+        }
+        const blks = [];
+        for (const o of occBy[k] || []) blks.push({ s: hmMin(o.start), e: hmMin(o.end), course: o });
+        for (const m of evBy[k] || []) blks.push({ s: hmMin(m.deadline.slice(11, 16)), e: hmMin(m.end_time), mail: m });
+        layoutLanes(blks);
+        for (const b of blks) {
+          const hpx = Math.max((b.e - b.s) / 60 * HP - 2, 20);
+          const node = b.course ? this.courseBlock(b.course, hpx, k === today && b.e <= nowMin || k < today) : this.mailBlock(b.mail, hpx);
+          node.style.top = topOf(b.s) + 'px';
+          node.style.height = hpx + 'px';
+          // 重叠的块不平分宽度（列太窄字会挤没），而是错位叠放：后面的向右缩进一截、盖在前面上面
+          const step = b.lanes > 2 ? 16 : 26;
+          node.style.left = 'calc(' + (b.lane * step) + '% + 2px)';
+          node.style.width = 'calc(' + (100 - step * (b.lanes - 1)) + '% - 4px)';
+          node.style.zIndex = 2 + b.lane;
+          col.append(node);
+        }
+        if (k === today && nowMin >= gs * 60) {
+          const nl = el('div', 'wknow');
+          nl.style.top = topOf(nowMin) + 'px';
+          col.append(nl);
+        }
+        cols.push(col);
+      });
+      $('#wkgrid').replaceChildren(...cols);
+
+      // 换周/首次进入时滚到合适位置（20 秒一次的自动刷新不动滚动条）
+      const wkKey = ymd(ws) + '|' + gs;
+      if (this.scrolledFor !== wkKey) {
+        this.scrolledFor = wkKey;
+        const cur = keys.includes(today);
+        $('#wkscroll').scrollTop = cur && nowMin > 9 * 60 ? Math.max(0, topOf(nowMin - 90)) : 0;
+      }
+      this.renderAgenda(days, keys, hol, occBy, evBy, dueBy, today, nowMin);
+    },
+    card(kind, o, past) {
+      const c = el('div', 'agcard ' + kind + (kind !== 'course' && kind !== 'holc' ? ' click' : '') + (past ? ' past' : ''));
+      c.append(el('div', 'agbar'));
+      const body = el('div', 'agbody');
+      c.append(body);
+      return [c, body];
+    },
+    renderAgenda(days, keys, hol, occBy, evBy, dueBy, today, nowMin) {
+      const box = $('#wkagenda');
+      box.replaceChildren();
+      const curWeek = keys.includes(today);
+      $('#wk-sidetitle').textContent = curWeek ? '本周议程' : $('#cal-title').textContent + ' 议程';
+      let count = 0;
+      keys.forEach((k, i) => {
+        if (curWeek && k < today) return;
+        const entries = [];
+        for (const o of occBy[k] || []) entries.push({ t: hmMin(o.start), course: o });
+        for (const m of evBy[k] || []) entries.push({ t: hmMin(m.deadline.slice(11, 16)), mail: m });
+        for (const m of dueBy[k] || []) entries.push({ t: 24 * 60, due: m });
+        if (!entries.length && !hol[k]) return;
+        entries.sort((a, b) => a.t - b.t);
+        const g = el('div', 'agday');
+        const d = days[i];
+        const isToday = k === today;
+        const h = el('div', 'agh' + (isToday ? ' today' : ''), '周' + WEEK_ZH[d.getDay()] + ' ' + (d.getMonth() + 1) + '/' + d.getDate());
+        if (isToday) h.append(el('span', 'tag', '今天'));
+        g.append(h);
+        if (hol[k]) {
+          const [c, b] = this.card('holc', null, false);
+          const r1 = el('div', 'agr1');
+          r1.append(ico('sun'), document.createTextNode('假期'));
+          b.append(r1, el('div', 'agr2', hol[k] + (/假/.test(hol[k]) ? '' : ' 假期')));
+          g.append(c);
+        }
+        for (const e of entries) {
+          if (e.course) {
+            const o = e.course;
+            const [c, b] = this.card('course', o, k < today || (isToday && hmMin(o.end) <= nowMin));
+            c.style.setProperty('--cc', this.courseColor(o.course_index));
+            const r1 = el('div', 'agr1');
+            r1.append(ico('clock'), document.createTextNode(o.start + ' - ' + o.end));
+            const r3 = el('div', 'agr3');
+            if (o.room) { r3.append(ico('pin'), el('span', 'rm', o.room)); }
+            if (o.teacher) r3.append(el('span', 'agt', o.teacher));
+            b.append(r1, el('div', 'agr2', o.name));
+            if (o.room || o.teacher) b.append(r3);
+            g.append(c);
+          } else if (e.mail) {
+            const m = e.mail;
+            const [c, b] = this.card('mail', m, m.ddl_status === 'expired');
+            c.style.setProperty('--cc', CAT_COLOR[m.cat] || '#8794a8');
+            const r1 = el('div', 'agr1');
+            r1.append(ico('clock'), document.createTextNode(m.deadline.slice(11, 16) + ' - ' + m.end_time), el('span', 'gap'), ico('mail'));
+            const r3 = el('div', 'agr3');
+            const pill = el('span', 'pill');
+            const dot = el('i'); dot.style.background = CAT_COLOR[m.cat] || '#888';
+            pill.append(dot, el('span', 'rm', m.cat_zh || m.cat || ''));
+            r3.append(pill);
+            const se = starsEl(m.stars, m.importance);
+            if (se) { se.style.marginLeft = 'auto'; r3.append(se); }
+            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), r3);
+            if ((m.conflicts || []).length) {
+              const w = el('div', 'agwarn');
+              w.append(ico('warn'), el('span', '', this.conflictText(m)));
+              b.append(w);
+            }
+            c.addEventListener('click', () => openDrawer(m.uid));
+            g.append(c);
+          } else {
+            const m = e.due;
+            const [c, b] = this.card('due', m, m.ddl_status === 'expired');
+            const r1 = el('div', 'agr1');
+            r1.append(ico('warn'), document.createTextNode(fmtDdl(m.deadline)));
+            const r3 = el('div', 'agr3');
+            r3.append(el('span', 'rm', m.cat_zh || m.cat || ''));
+            const se = starsEl(m.stars, m.importance);
+            if (se) { se.style.marginLeft = 'auto'; r3.append(se); }
+            b.append(r1, el('div', 'agr2', m.subject || '(无主题)'), r3);
+            c.addEventListener('click', () => openDrawer(m.uid));
+            g.append(c);
+          }
+          count++;
+        }
+        box.append(g);
+      });
+      $('#wk-count').textContent = count + ' 项';
+      if (!box.children.length) box.append(el('div', 'wkempty', (curWeek ? '这周剩下的日子' : '这一周') + '没有课程、活动或截止' + ((this.min3 || this.hideExp) ? '（当前有筛选）' : '')));
+    },
+
+    // ================= 月视图（原有） =================
     range() {
       const first = this.month;
       const off = (first.getDay() + 6) % 7;                       // 周一开头
@@ -766,8 +1112,9 @@
       const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 41);   // 固定 6 周
       return [start, end];
     },
-    async load() {
+    async loadMonth() {
       const my = ++this.seq;
+      this.updateTitle();
       const [a, b] = this.range();
       this.gridFrom = ymd(a); this.gridTo = ymd(b);
       const t = new Date();
@@ -783,19 +1130,7 @@
         if (my === this.seq) toast('加载日历失败：' + e.message, true);
         return;
       }
-      this.render();
-    },
-    visible(m) {
-      if (this.hideExp && m.ddl_status === 'expired') return false;
-      if (this.min3 && !(m.stars >= 3)) return false;
-      return true;
-    },
-    timeText(m) { return m.has_time ? m.deadline.slice(11, 16) : '全天'; },
-    dots(n) {
-      if (!n) return null;
-      const d = el('span', 'dots s' + n, '●'.repeat(n));
-      d.title = n + ' 星 · ' + STAR_ZH[n];
-      return d;
+      this.renderMonth();
     },
     chip(m) {
       const c = el('div', 'chip s' + (m.stars || 0) + (m.ddl_status === 'expired' ? ' exp' : ''));
@@ -831,9 +1166,9 @@
       r.addEventListener('click', () => openDrawer(m.uid));
       return r;
     },
-    render() {
+    renderMonth() {
       const [a] = this.range();
-      $('#cal-title').textContent = this.month.getFullYear() + '年' + (this.month.getMonth() + 1) + '月';
+      this.updateTitle();
       const byDay = {};
       for (const m of this.items) if (this.visible(m)) (byDay[m.deadline.slice(0, 10)] = byDay[m.deadline.slice(0, 10)] || []).push(m);
       const today = ymd(new Date());
@@ -849,7 +1184,7 @@
         cell.append(num);
         for (const m of list.slice(0, 3)) cell.append(this.chip(m));
         if (list.length > 3) cell.append(el('div', 'cmore', '+' + (list.length - 3)));
-        cell.addEventListener('click', () => { this.sel = (this.sel === key ? '' : key); this.render(); });
+        cell.addEventListener('click', () => { this.sel = (this.sel === key ? '' : key); this.renderMonth(); });
         cells.push(cell);
       }
       $('#calgrid').replaceChildren(...cells);
@@ -878,15 +1213,26 @@
       if (!up.length) box.append(el('div', 'cempty', '接下来两周没有截止或活动' + ((this.min3 || this.hideExp) ? '（当前有筛选）' : '')));
       for (const m of up) box.append(this.row(m, true));
     },
+
+    // ================= 通用 =================
     shift(n) {
-      this.month = new Date(this.month.getFullYear(), this.month.getMonth() + n, 1);
-      this.sel = '';
+      if (this.mode === 'week') {
+        this.weekStart = addDays(this.weekStart, 7 * n);
+      } else {
+        this.month = new Date(this.month.getFullYear(), this.month.getMonth() + n, 1);
+        this.sel = '';
+      }
       this.load();
     },
     goToday() {
       const t = new Date();
-      this.month = new Date(t.getFullYear(), t.getMonth(), 1);
-      this.sel = ymd(t);
+      if (this.mode === 'week') {
+        this.weekStart = mondayOf(t);
+        this.scrolledFor = '';
+      } else {
+        this.month = new Date(t.getFullYear(), t.getMonth(), 1);
+        this.sel = ymd(t);
+      }
       this.load();
     },
     async exportIcs() {
@@ -894,7 +1240,7 @@
       b.disabled = true;
       try {
         const r = await post('/api/calendar/ics', { min: this.min3 ? 3 : 0 });
-        toast('已导出 ' + r.count + ' 项到 下载/' + r.name + '，双击可加入系统日历');
+        toast('已导出 ' + r.count + ' 项邮件事项到 下载/' + r.name + '（不含课程），双击可加入系统日历');
       } catch (e) {
         toast('导出失败：' + e.message, true);
       } finally {
@@ -905,6 +1251,7 @@
       $('#cal-prev').onclick = () => this.shift(-1);
       $('#cal-next').onclick = () => this.shift(1);
       $('#cal-today').onclick = () => this.goToday();
+      $('#cal-mode').addEventListener('click', e => { const b = e.target.closest('button'); if (b) this.setMode(b.dataset.mode); });
       $('#cal-min3').addEventListener('change', e => { this.min3 = e.target.checked; lsSet('mc_cal_min3', this.min3 ? '1' : '0'); this.render(); });
       $('#cal-hideexp').addEventListener('change', e => { this.hideExp = e.target.checked; lsSet('mc_cal_hideexp', this.hideExp ? '1' : '0'); this.render(); });
       $('#cal-export').onclick = () => this.exportIcs();
@@ -912,7 +1259,118 @@
   };
 
   // ------------------------------------------------------------ 抽屉 / 弹窗
+  let drawerSeq = 0;      // 打开/关闭一次加一，防止慢请求回来覆盖别的邮件
+  const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';
+  function fileIcon(a) {
+    const ext = ((a.filename.split('.').pop()) || '').toLowerCase(), ct = a.content_type || '';
+    if (ct.startsWith('image/')) return '🖼';
+    if (ct.startsWith('audio/')) return '🎵';
+    if (ct.startsWith('video/')) return '🎬';
+    if (ext === 'pdf' || ct === 'application/pdf') return '📕';
+    if (['doc', 'docx', 'pages', 'rtf', 'txt', 'md'].includes(ext)) return '📝';
+    if (['xls', 'xlsx', 'csv', 'numbers'].includes(ext)) return '📊';
+    if (['ppt', 'pptx', 'key'].includes(ext)) return '📽';
+    if (['zip', 'rar', '7z', 'gz', 'tar', 'tgz'].includes(ext)) return '🗜';
+    if (ext === 'ics' || ct === 'text/calendar') return '📅';
+    if (ext === 'eml') return '✉️';
+    return '📎';
+  }
+  // 纯文本里的网址变成可点链接（target=_blank，pywebview 会交给系统浏览器）
+  function linkify(text) {
+    const frag = document.createDocumentFragment();
+    const re = /https?:\/\/[^\s<>"'）】]+/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      const url = m[0].replace(/[.,;:!?)\]]+$/, '');
+      if (m.index > last) frag.append(text.slice(last, m.index));
+      const a = el('a', '', url);
+      a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      frag.append(a);
+      last = m.index + url.length;
+      re.lastIndex = last;
+    }
+    frag.append(text.slice(last));
+    return frag;
+  }
+  function noteBar(text, warn, ...btns) {
+    const n = el('div', 'dnote' + (warn ? ' warn' : ''));
+    n.append(el('span', 'grow', text), ...btns);
+    return n;
+  }
+  function renderAttachments(box, uid, atts, saved) {
+    box.replaceChildren();
+    if (!atts.length) return;
+    const wrap = el('div', 'datts');
+    wrap.append(el('div', 'dah', '附件 · ' + atts.length));
+    for (const a of atts) {
+      const row = el('div', 'datt');
+      const info = el('div', 'an');
+      const sub = el('span', '', fmtSize(a.size) + ' · ' + (a.content_type || ''));
+      info.append(el('b', '', a.filename), sub);
+      info.title = a.filename;
+      const btn = el('button', '', '保存到下载');
+      if (saved[a.index]) { sub.textContent = '已保存到 ' + saved[a.index]; row.classList.add('saved'); btn.textContent = '已保存 ✓'; btn.disabled = true; }
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = '保存中…';
+        try {
+          const s = await post('/api/email/' + uid + '/attachment/' + a.index + '/save');
+          saved[a.index] = s.path;
+          sub.textContent = '已保存到 ' + s.path;
+          row.classList.add('saved');
+          btn.textContent = '已保存 ✓';
+          toast('已保存到 ' + s.path);
+        } catch (e) {
+          btn.disabled = false; btn.textContent = '保存到下载';
+          toast('保存失败：' + e.message, true);
+        }
+      };
+      row.append(el('span', 'ai', fileIcon(a)), info, btn);
+      wrap.append(row);
+    }
+    box.append(wrap);
+  }
+  // 按需取原文并显示：HTML 放沙箱 iframe（无脚本、无同源），否则纯文本；失败退回本地纯文本
+  async function loadFull(my, uid, images, ctx) {
+    ctx.note.replaceChildren(noteBar('正在从邮箱取原文…'));
+    let r;
+    try { r = await api('/api/email/' + uid + '/full' + (images ? '?images=1' : '')); } catch (e) { r = { ok: false, error: e.message }; }
+    if (my !== drawerSeq) return;
+    if (!r.ok) {
+      const retry = el('button', '', '重试');
+      retry.onclick = () => loadFull(my, uid, images, ctx);
+      ctx.note.replaceChildren(noteBar('没能取到邮件原文：' + (r.error || '未知错误') + '。下面显示的是本地保存的纯文本（只存了前一部分）。', true, retry));
+      return;
+    }
+    if (!ctx.metaDone) {
+      ctx.metaDone = true;
+      if (r.to) ctx.add('收件人', r.to);
+      if (r.cc) ctx.add('抄送', r.cc);
+    }
+    if (r.html) {
+      const f = document.createElement('iframe');
+      f.className = 'dframe';
+      f.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');   // 没有 allow-scripts / allow-same-origin
+      f.setAttribute('referrerpolicy', 'no-referrer');
+      f.srcdoc = r.html;
+      ctx.body.replaceChildren(f);
+    } else {
+      const d = el('div', 'dbody');
+      d.append(r.text && r.text.trim() ? linkify(r.text) : document.createTextNode('（正文为空）'));
+      ctx.body.replaceChildren(d);
+    }
+    if (r.blocked_images > 0) {
+      const b = el('button', '', '显示外部图片');
+      b.onclick = () => loadFull(my, uid, true, ctx);
+      ctx.note.replaceChildren(noteBar('已屏蔽 ' + r.blocked_images + ' 张外部图片（防止发件人追踪你是否打开了邮件）。', false, b));
+    } else if (r.external_images) {
+      ctx.note.replaceChildren(noteBar('已显示外部图片。'));
+    } else {
+      ctx.note.replaceChildren();
+    }
+    renderAttachments(ctx.atts, uid, r.attachments || [], ctx.saved);
+  }
   async function openDrawer(uid) {
+    const my = ++drawerSeq;
     const dr = $('#drawer'), box = $('#dcontent');
     box.replaceChildren(el('div', 'conf', '加载中…'));
     dr.classList.add('open');
@@ -920,6 +1378,7 @@
     $('#drawer-mask').hidden = false;
     try {
       const m = await api('/api/email/' + uid);
+      if (my !== drawerSeq) return;
       const meta = el('div', 'dmeta');
       const add = (k, v, node) => { meta.append(el('div', '', k)); const d = el('div'); if (node) d.append(node); else d.textContent = v; meta.append(d); };
       add('日期', m.date || '');
@@ -943,15 +1402,20 @@
           return s;
         })());
       }
-      box.replaceChildren(el('div', 'dsubj', m.subject || '(无主题)'), meta, el('div', 'dbody', m.body || '（正文为空）'));
+      const ctx = { add, note: el('div'), atts: el('div'), body: el('div'), metaDone: false, saved: {} };
+      ctx.body.append(el('div', 'dbody', m.body || '（正文为空）'));       // 先给本地纯文本，原文取回来再替换
+      box.replaceChildren(el('div', 'dsubj', m.subject || '(无主题)'), meta, ctx.note, ctx.atts, ctx.body);
+      loadFull(my, uid, false, ctx);
     } catch (e) {
-      box.replaceChildren(el('div', 'conf', '加载失败：' + e.message));
+      if (my === drawerSeq) box.replaceChildren(el('div', 'conf', '加载失败：' + e.message));
     }
   }
   function closeDrawer() {
+    drawerSeq++;
     $('#drawer').classList.remove('open');
     $('#drawer').setAttribute('aria-hidden', 'true');
     $('#drawer-mask').hidden = true;
+    setTimeout(() => { if (!$('#drawer').classList.contains('open')) $('#dcontent').replaceChildren(); }, 300);   // 卸掉 iframe，省内存
   }
   function confirmDialog(text, okLabel) {
     return new Promise(res => {

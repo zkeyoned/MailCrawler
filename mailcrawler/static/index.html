@@ -97,19 +97,41 @@
 
   <section id="calview" hidden>
     <div class="caltool">
-      <div class="calnav">
-        <button id="cal-prev" class="calbtn" title="上个月">‹ 上个月</button>
+      <div class="calleft">
         <button id="cal-today" class="calbtn">今天</button>
-        <button id="cal-next" class="calbtn" title="下个月">下个月 ›</button>
+        <div class="seg" id="cal-mode"><button data-mode="week">周</button><button data-mode="month">月</button></div>
+      </div>
+      <div class="calnav">
+        <button id="cal-prev" class="calarrow" title="上一周">‹</button>
         <b id="cal-title"></b>
+        <button id="cal-next" class="calarrow" title="下一周">›</button>
       </div>
       <div class="calfilt">
-        <label class="chk"><input type="checkbox" id="cal-min3"> 只看 ≥3 星</label>
+        <label class="chk"><input type="checkbox" id="cal-min3"> ≥3 星</label>
         <label class="chk"><input type="checkbox" id="cal-hideexp"> 隐藏已过期</label>
-        <button id="cal-export" class="calbtn accent" title="导出未过期条目为 .ics，保存到「下载」文件夹">导出 .ics</button>
+        <button id="cal-export" class="icon" title="导出邮件事项为 .ics（不含课程），保存到「下载」文件夹"></button>
       </div>
     </div>
-    <div class="calbody">
+
+    <!-- 周视图：时间网格 + 右侧议程 -->
+    <div id="calweek" class="wkbody" hidden>
+      <div class="wkmain">
+        <div id="wkscroll" class="wkscroll">
+          <div class="wkheadwrap">
+            <div id="wkhead" class="wkrow"></div>
+            <div id="wkdue" class="wkrow wkdue" hidden></div>
+          </div>
+          <div id="wkgrid" class="wkrow wkgrid"></div>
+        </div>
+      </div>
+      <aside class="wkside">
+        <div class="wksidehd"><b id="wk-sidetitle">本周议程</b><span id="wk-count"></span></div>
+        <div id="wkagenda"></div>
+      </aside>
+    </div>
+
+    <!-- 月视图（原有） -->
+    <div id="calmonth" class="calbody" hidden>
       <div class="calmain">
         <div class="calweek"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
         <div id="calgrid" class="calgrid"></div>

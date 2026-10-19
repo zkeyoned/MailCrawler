@@ -29,3 +29,6 @@ dist/
 # 测试/临时
 .pytest_cache/
 /tmp/
+
+# 课表只存在用户本机数据目录，万一被拷进仓库也不提交
+timetable.json

@@ -14,6 +14,7 @@ import re
 import ssl
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from email.header import decode_header, make_header
@@ -306,6 +307,71 @@ def start_sync(auto=False):
         threading.Thread(target=sync_worker, args=(auto,), daemon=True, name="sync").start()
         return True
 
+
+
+# ------------------------------------------------------------------ 按需取一封完整原文（只读）
+RAW_CACHE_MAX = 50                 # 最多缓存最近 50 封
+RAW_CACHE_BYTES = 120 * 1024 * 1024  # 总量上限（带大附件的邮件别把内存撑爆）
+_RAW = OrderedDict()               # uid → 原文 bytes（LRU）
+_RAW_LOCK = threading.Lock()
+
+
+class MessageGone(Exception):
+    """邮件已不在收件箱（被移走/删除）。"""
+
+
+def _cache_get(uid):
+    with _RAW_LOCK:
+        raw = _RAW.get(uid)
+        if raw is not None:
+            _RAW.move_to_end(uid)
+        return raw
+
+
+def _cache_put(uid, raw):
+    with _RAW_LOCK:
+        _RAW[uid] = raw
+        _RAW.move_to_end(uid)
+        total = sum(len(v) for v in _RAW.values())
+        while _RAW and (len(_RAW) > RAW_CACHE_MAX or (total > RAW_CACHE_BYTES and len(_RAW) > 1)):
+            _, old = _RAW.popitem(last=False)
+            total -= len(old)
+
+
+def clear_raw_cache():
+    with _RAW_LOCK:
+        _RAW.clear()
+
+
+def fetch_raw(uid):
+    """取一封完整原文（只读选择 + BODY.PEEK[]，不会标已读）。先查内存缓存；
+    失败抛异常（MessageGone=邮件已被移走；其余是网络/登录问题），调用方负责给用户友好提示。"""
+    uid = int(uid)
+    hit = _cache_get(uid)
+    if hit is not None:
+        return hit
+    M = _connect()
+    try:
+        typ, _ = M.select("INBOX", readonly=True)            # 只读选择
+        if typ != "OK":
+            raise RuntimeError("打不开收件箱")
+        typ, data = M.uid("fetch", str(uid), "(BODY.PEEK[])")  # PEEK：不改变已读状态
+        if typ != "OK":
+            raise RuntimeError("取信失败：%s" % typ)
+        raw = b""
+        for u, _seen, r in parse_fetch(data or []):
+            if u == uid and r:
+                raw = r
+                break
+        if not raw:
+            raise MessageGone("这封邮件已不在收件箱里")
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+    _cache_put(uid, raw)
+    return raw
 
 # ------------------------------------------------------------------ 移到「已删除」（唯一会改邮箱的操作）
 TRASH_LOCK = threading.Lock()

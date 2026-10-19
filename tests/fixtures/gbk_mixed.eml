@@ -1,0 +1,28 @@
+From: =?UTF-8?B?5pWZ5Yqh5aSE?= <jw@example.edu.cn>
+To: stu@example.edu.cn
+Cc: =?UTF-8?B?5Yqp5pWZ?= <ta@example.edu.cn>
+Subject: =?UTF-8?B?5a6e6aqM5oql5ZGK5o+Q5Lqk6YCa55+l?=
+Date: Mon, 19 Oct 2026 09:30:00 +0800
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BB"
+
+--BB
+Content-Type: text/plain; charset=gb2312
+Content-Transfer-Encoding: base64
+
+zazRp8PHusOjug0Kx+vT2rG+1tzO5cewzOG9u8q10emxqLjmoaMNCg==
+--BB
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="=?UTF-8?B?5oiQ57up5Y2VLnR4dA==?="
+Content-Transfer-Encoding: base64
+
+5oiQ57up5Y2V5YaF5a65
+--BB
+Content-Type: message/rfc822
+Content-Disposition: attachment
+
+From: a@b.c
+Subject: inner mail
+
+inner body
+--BB--

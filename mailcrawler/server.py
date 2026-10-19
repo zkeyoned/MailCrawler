@@ -6,9 +6,12 @@
   * 密码/API key 只存在系统钥匙串，任何接口都不回传；
   * 同步只读（readonly + BODY.PEEK）；唯一会改邮箱的接口是 POST /api/trash：只做「移到已删除文件夹」。
 """
+import imaplib
 import json
 import mimetypes
 import re
+import socket
+import ssl
 import threading
 import time
 from datetime import datetime
@@ -16,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import config, ics, jev, mailbox, secrets, store
+from . import config, ics, jev, mailbox, mimeview, secrets, store, timetable
 from .paths import log_path
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -107,6 +110,61 @@ def _star_arg(qs, name):
     except ValueError:
         return None
     return v if 1 <= v <= 5 else None
+
+
+def friendly_fetch_error(e):
+    """原文抓取失败 → 给用户看的话。"""
+    if isinstance(e, mailbox.MessageGone):
+        return "这封邮件已不在收件箱里（可能已被移走或删除）"
+    if isinstance(e, (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError)):
+        return "连不上邮箱服务器，请检查网络后重试"
+    if isinstance(e, imaplib.IMAP4.error):
+        return "邮箱拒绝了这次请求（%s）" % str(e).strip("b'\" ")[:80]
+    return "取原文失败（%s）" % e
+
+
+def unique_path(d, name):
+    """下载目录里不重名：已有就加序号（a.pdf → a (1).pdf）。"""
+    p = d / name
+    if not p.exists():
+        return p
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem:
+        stem, ext = name, ""
+    else:
+        ext = "." + ext
+    n = 1
+    while True:
+        p = d / ("%s (%d)%s" % (stem, n, ext))
+        if not p.exists():
+            return p
+        n += 1
+
+
+class SaveError(Exception):
+    """写本地文件失败（和取原文的网络错误区分开）。"""
+
+
+def save_attachment(uid, index):
+    """把一封邮件的第 index 个附件写进「下载」文件夹（不自动打开）。返回 (路径, 文件名, 大小)。"""
+    raw = mailbox.fetch_raw(uid)
+    got = mimeview.get_attachment(raw, index)
+    if got is None:
+        raise KeyError(index)
+    name, payload = got
+    try:
+        d = ics.downloads_dir()
+        for _ in range(50):              # "xb" 独占创建：并发/竞态时也不会覆盖已有文件
+            p = unique_path(d, mimeview.safe_filename(name))
+            try:
+                with open(p, "xb") as f:
+                    f.write(payload)
+                return str(p), p.name, len(payload)
+            except FileExistsError:
+                continue
+        raise OSError("重名文件太多")
+    except OSError as e:
+        raise SaveError("保存失败：%s" % e)
 
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -221,6 +279,40 @@ class H(BaseHTTPRequestHandler):
                 items = store.calendar_items(frm, to, min_stars=_star_arg(qs, "min"),
                                              hide_expired=(qs.get("hide_expired") or ["0"])[0] == "1")
                 return self.send_json({"from": frm, "to": to, "total": len(items), "items": items})
+            m = re.fullmatch(r"/api/email/(\d+)/full", path)
+            if m:
+                uid = int(m.group(1))
+                local = store.get_email(uid)
+                if local is None:
+                    return self.send_json({"error": "not found"}, 404)
+                ext = (qs.get("images") or ["0"])[0] == "1"
+                try:
+                    raw = mailbox.fetch_raw(uid)
+                except Exception as e:
+                    # 原文取不到：不报错，让前端退回显示库里的纯文本
+                    return self.send_json({"ok": False, "error": friendly_fetch_error(e), "text": local["body"] or ""})
+                try:
+                    res = mimeview.render(raw, allow_external=ext)
+                except Exception as e:
+                    return self.send_json({"ok": False, "error": "原文解析失败（%s）" % e, "text": local["body"] or ""})
+                res["ok"] = True
+                return self.send_json(res)
+            if path == "/api/timetable":
+                try:
+                    frm = _date_arg((qs.get("from") or [""])[0], "from")
+                    to = _date_arg((qs.get("to") or [""])[0], "to")
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                a, b = datetime.strptime(frm, "%Y-%m-%d").date(), datetime.strptime(to, "%Y-%m-%d").date()
+                if b < a or (b - a).days > 400:
+                    return self.send_json({"error": "日期范围不对（to 不能早于 from，最多 400 天）"}, 400)
+                return self.send_json(timetable.payload(a, b))
+            if path == "/api/week":
+                try:
+                    start = _date_arg((qs.get("start") or [""])[0], "start")
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                return self.send_json(timetable.week_payload(datetime.strptime(start, "%Y-%m-%d").date()))
             m = re.fullmatch(r"/api/email/(\d+)", path)
             if m:
                 e = store.get_email_full(int(m.group(1)))
@@ -286,6 +378,21 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json({"error": "写文件失败：%s" % e}, 500)
                 log_line("calendar exported: %s (%d)" % (name, len(items)))
                 return self.send_json({"path": full, "name": name, "count": len(items)})
+            m = re.fullmatch(r"/api/email/(\d+)/attachment/(\d+)/save", path)
+            if m:
+                uid, idx = int(m.group(1)), int(m.group(2))
+                if store.get_email(uid) is None:
+                    return self.send_json({"error": "not found"}, 404)
+                try:
+                    full, name, size = save_attachment(uid, idx)
+                except KeyError:
+                    return self.send_json({"error": "没有这个附件"}, 404)
+                except SaveError as e:
+                    return self.send_json({"error": str(e)}, 500)
+                except Exception as e:
+                    return self.send_json({"error": friendly_fetch_error(e)}, 502)
+                log_line("attachment saved: uid=%d #%d %s (%d bytes)" % (uid, idx, name, size))
+                return self.send_json({"path": full, "name": name, "size": size})
             if path == "/api/trash":
                 uids = body.get("uids")
                 if not isinstance(uids, list) or not uids or len(uids) > 5000:
