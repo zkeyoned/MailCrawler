@@ -53,7 +53,7 @@ def start_auto_sync():
 def progress():
     with store.DB_LOCK, store.db() as c:
         total = c.execute("SELECT COUNT(*) FROM emails WHERE trashed=0").fetchone()[0]
-        classified = c.execute("SELECT COUNT(*) FROM triage").fetchone()[0]
+        classified = c.execute("SELECT COUNT(*) FROM triage WHERE importance IS NOT NULL").fetchone()[0]
     return {"syncing": mailbox.SYNC["syncing"], "synced": mailbox.SYNC["synced"], "to_sync": mailbox.SYNC["to_sync"],
             "total_found": mailbox.SYNC["total_found"], "emails_in_db": total, "classified": classified,
             "sent_to_jev": store.meta_get("sent_to_jev"), "words_read": store.meta_get("words_read"),
@@ -68,7 +68,8 @@ def setup_info():
     info = {"logged_in": ready,
             "email": cfg.get("email") if ready else "",
             "since": cfg.get("since") or "", "before": cfg.get("before") or "",
-            "auto_sync": bool(cfg.get("auto_sync")), "auto_sync_minutes": int(cfg.get("auto_sync_minutes") or 30)}
+            "auto_sync": bool(cfg.get("auto_sync")), "auto_sync_minutes": int(cfg.get("auto_sync_minutes") or 30),
+            "preferences": cfg.get("preferences") or "", "ignore_senders": cfg.get("ignore_senders") or ""}
     if ready:
         info["progress"] = progress()
         toks = 0
@@ -97,6 +98,15 @@ def log_line(msg):
             f.write("[%s] %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
     except Exception:
         pass
+
+
+def _star_arg(qs, name):
+    """查询串里的星级筛选参数：1~5 的整数，其余当没传。"""
+    try:
+        v = int((qs.get(name) or [""])[0])
+    except ValueError:
+        return None
+    return v if 1 <= v <= 5 else None
 
 
 # ------------------------------------------------------------------ HTTP
@@ -184,7 +194,10 @@ class H(BaseHTTPRequestHandler):
                 q = (qs.get("q") or [""])[0].strip()
                 limit = max(1, min(int((qs.get("limit") or ["200"])[0]), 1000))
                 offset = max(0, int((qs.get("offset") or ["0"])[0]))
-                return self.send_json(store.list_emails(view, q, limit, offset))
+                sort = (qs.get("sort") or ["date"])[0]
+                lo = _star_arg(qs, "min")
+                hi = _star_arg(qs, "max")
+                return self.send_json(store.list_emails(view, q, limit, offset, sort=sort, min_stars=lo, max_stars=hi))
             m = re.fullmatch(r"/api/email/(\d+)", path)
             if m:
                 e = store.get_email_full(int(m.group(1)))
@@ -283,6 +296,15 @@ class H(BaseHTTPRequestHandler):
                 kwargs["auto_sync_minutes"] = max(5, min(int(body.get("auto_sync_minutes")), 24 * 60))
             except (TypeError, ValueError):
                 return self.send_json({"error": "同步间隔应是分钟数"}, 400)
+        for k, limit in (("preferences", jev.PREF_MAX), ("ignore_senders", 4000)):
+            if k in body:
+                v = body.get(k)
+                if not isinstance(v, str):
+                    return self.send_json({"error": "%s 应是文本" % k}, 400)
+                v = v.strip()
+                if len(v) > limit:
+                    return self.send_json({"error": "太长了（最多 %d 个字符）" % limit}, 400)
+                kwargs[k] = v
         return self.send_json(config.save(**kwargs))
 
 

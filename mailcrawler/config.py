@@ -14,6 +14,8 @@ DEFAULTS = {
     "before": "",           # 同步截止日期 YYYY-MM-DD（含当天），空 = 不限
     "auto_sync": False,     # 新邮件自动同步开关（默认关）
     "auto_sync_minutes": 30,  # 自动同步间隔（分钟）
+    "preferences": "",      # 「我的偏好」：多行文本，拼进「重要程度」那道题的 instructions（只存本机）
+    "ignore_senders": "",   # 「总是忽略的发件人」：每行一个关键字，命中的邮件直接 1 星、不调 Jev（只存本机）
 }
 
 _lock = threading.RLock()   # save() 内部会回调 load()，必须可重入

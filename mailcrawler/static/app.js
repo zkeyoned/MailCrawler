@@ -15,15 +15,24 @@
   const fmt = n => Number(n || 0).toLocaleString('en-US');
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-  const CAT_ORDER = ['coursework', 'academic_admin', 'campus_life', 'event', 'career', 'newsletter', 'personal'];
+  const CAT_ORDER = ['coursework', 'academic_admin', 'campus_life', 'event', 'career', 'newsletter', 'personal', 'automated', 'ignored'];
   const CAT_COLOR = {
     coursework: '#ff6b6b', academic_admin: '#ffa94d', campus_life: '#69db7c', event: '#4dabf7',
-    career: '#da77f2', newsletter: '#7d8799', personal: '#ffd43b'
+    career: '#da77f2', newsletter: '#7d8799', personal: '#ffd43b', automated: '#5c7f9e', ignored: '#4a5463'
   };
   const CAT_ZH = {
     coursework: '课程作业考试', academic_admin: '教务行政', campus_life: '校园生活与服务',
-    event: '讲座活动比赛', career: '实习招聘', newsletter: '群发通知与订阅', personal: '写给你本人'
+    event: '讲座活动比赛', career: '实习招聘', newsletter: '群发通知与订阅', personal: '写给你本人',
+    automated: '系统自动通知', ignored: '已忽略（发件人规则）'
   };
+  const STAR_ZH = { 5: '必须马上处理', 4: '这周要处理', 3: '值得看一眼', 2: '可看可不看', 1: '完全不用看' };
+  // 星级：★ 实心 + ☆ 空心；没有分数（老邮件还没重新判断）返回 null
+  function starsEl(n, imp) {
+    if (!n) return null;
+    const s = el('span', 'stars s' + n, '★'.repeat(n) + '☆'.repeat(5 - n));
+    s.title = STAR_ZH[n] + (imp != null ? '（' + Number(imp).toFixed(1) + '）' : '');
+    return s;
+  }
   const DDL_ZH = { expired: '已过期', open: '还没过', none: '无截止' };
 
   async function api(path, opt) {
@@ -45,7 +54,7 @@
   }
 
   // ------------------------------------------------------------ 全局状态
-  const S = { view: 'crawl', grid: 9, speed: 1, q: '', stats: null, prog: null, setup: null };
+  const S = { view: 'crawl', grid: 9, speed: 1, q: '', stats: null, prog: null, setup: null, sort: 'date', minStars: '', maxStars: '' };
   const Q = { items: [], fetching: false, last: 0, exhausted: false };   // 爬虫取信队列
     const W = { total: 0, pending: 0, inited: false };                     // WORDS READ
   const GRIDS = { 4: [2, 2], 9: [3, 3], 12: [4, 3], 20: [5, 4] };        // [列, 行]
@@ -352,6 +361,8 @@
       this.root.classList.add('hasv');
       const row1 = el('div', 'vrow');
       row1.append(el('i', 'vdot'), el('b', '', r.cat_zh || r.cat), el('span', 'conf', Math.round((r.cat_conf || 0) * 100) + '%'));
+      const st = starsEl(r.stars, r.importance);
+      if (st) row1.append(st);
       const row2 = el('div', 'vrow');
       row2.append(el('span', '', '📅'));
       if (r.deadline) row2.append(el('span', '', fmtDdl(r.deadline)));
@@ -509,7 +520,7 @@
       mk('expired', '已过期 · 可删', st ? st.expired : null, '#b58a8e'));
     const cats = $('#nav-cats');
     const zh = (st && st.cat_zh) || CAT_ZH;
-    cats.replaceChildren(...CAT_ORDER.map(k => mk('cat:' + k, zh[k] || k, st ? st.cats[k] : null, CAT_COLOR[k])));
+    cats.replaceChildren(...CAT_ORDER.filter(k => k !== 'ignored' || (st && st.cats[k])).map(k => mk('cat:' + k, zh[k] || k, st ? st.cats[k] : null, CAT_COLOR[k])));
     $('#cost').textContent = '$' + (st ? st.cost_usd : 0).toFixed(4);
   }
   function renderSync() {
@@ -595,7 +606,7 @@
     const exp = S.view === 'expired';
     const cols = [];
     if (exp) cols.push(['', 38]);
-    cols.push(['日期', 118], ['类别', 150], ['主题', 0], ['发件人', 210], ['DDL', 130], ['状态', 84]);
+    cols.push(['日期', 118], ['类别', 150], ['重要', 84], ['主题', 0], ['发件人', 210], ['DDL', 130], ['状态', 84]);
     const tr = $('#lhead');
     tr.replaceChildren();
     for (const [name, w] of cols) {
@@ -611,7 +622,7 @@
     if (reset) buildHead();
     try {
       const r = await api('/api/emails?view=' + encodeURIComponent(S.view) + '&q=' + encodeURIComponent(S.q) +
-        '&limit=200&offset=' + L.items.length);
+        '&sort=' + S.sort + '&min=' + S.minStars + '&max=' + S.maxStars + '&limit=200&offset=' + L.items.length);
       if (myView !== S.view || myQ !== S.q) return;   // 期间切了视图，丢弃
       L.total = r.total;
       const start = L.items.length;
@@ -674,6 +685,10 @@
         tc.style.color = 'var(--dim2)';
       }
       tr.append(tc);
+      const tstar = el('td');
+      const se = starsEl(m.stars, m.importance);
+      if (se) tstar.append(se);
+      tr.append(tstar);
       const ts = el('td', m.seen ? '' : 'unread');
       if (m.classified && m.action >= 0.6) ts.append(el('span', 'hand', '✋'));
       ts.append(document.createTextNode(m.subject || '(无主题)'));
@@ -729,6 +744,12 @@
         const dot = el('i'); dot.style.background = CAT_COLOR[m.cat] || '#888';
         pill.append(dot, el('span', '', (m.cat_zh || m.cat) + ' · ' + Math.round((m.cat_conf || 0) * 100) + '%'));
         add('类别', '', pill);
+        const se = starsEl(m.stars, m.importance);
+        if (se) {
+          const w = el('span');
+          w.append(se, document.createTextNode(' ' + STAR_ZH[m.stars] + (m.ignored ? '（发件人在「总是忽略」名单里，没有送去 Jev）' : '')));
+          add('重要程度', '', w);
+        }
         add('要动手', (m.action >= 0.6 ? '是 ' : '否 ') + Math.round((m.action || 0) * 100) + '%');
         add('DDL', '', (() => {
           const s = el('span');
@@ -870,6 +891,8 @@
     $('#st-before').value = cfg.before || '';
     $('#st-auto').checked = !!cfg.auto_sync;
     $('#st-min').value = cfg.auto_sync_minutes || 30;
+    $('#st-prefs').value = cfg.preferences || '';
+    $('#st-ignore').value = cfg.ignore_senders || '';
     $('#st-error').hidden = true;
     $('#settings-mask').hidden = false;
   }
@@ -880,13 +903,14 @@
     err.hidden = true;
     const body = {
       since: $('#st-since').value, before: $('#st-before').value,
-      auto_sync: $('#st-auto').checked, auto_sync_minutes: parseInt($('#st-min').value, 10) || 30
+      auto_sync: $('#st-auto').checked, auto_sync_minutes: parseInt($('#st-min').value, 10) || 30,
+      preferences: $('#st-prefs').value, ignore_senders: $('#st-ignore').value
     };
     try {
       const cfg = await post('/api/settings', body);
       S.setup = Object.assign(S.setup || {}, cfg, { logged_in: true });
       closeSettings();
-      toast('设置已保存；同步范围对下一轮爬取生效');
+      toast('设置已保存；同步范围、我的偏好、忽略名单对之后新分类的邮件生效');
     } catch (e) {
       err.textContent = e.message || String(e);
       err.hidden = false;
@@ -944,6 +968,13 @@
       if (w.scrollTop + w.clientHeight > w.scrollHeight - 300) loadList(false);
     });
     $('#selall').addEventListener('change', e => selectAll(e.target.checked));
+    $('#l-sort').addEventListener('change', e => { S.sort = e.target.value; L.reset(); loadList(true); });
+    $('#l-stars').addEventListener('change', e => {
+      const v = e.target.value;   // '' | 'min4' | 'max2' | ...
+      S.minStars = v.startsWith('min') ? v.slice(3) : '';
+      S.maxStars = v.startsWith('max') ? v.slice(3) : '';
+      L.reset(); loadList(true);
+    });
     $('#btn-trash').onclick = doTrash;
     $('#btn-settings').onclick = openSettings;
     $('#st-close').onclick = closeSettings;

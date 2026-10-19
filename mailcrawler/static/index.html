@@ -12,7 +12,7 @@
 <section id="login" hidden>
   <div class="lcard">
     <div class="lbrand"><span class="logo">🕷</span><b>邮件爬虫</b><span class="ltag">开源 · 本地运行</span></div>
-    <p class="lhint">连接你的学校邮箱（腾讯企业邮箱 IMAP，只读同步），用 AI 把邮件分成七类、找出截止日期。</p>
+    <p class="lhint">连接你的学校邮箱（腾讯企业邮箱 IMAP，只读同步），用 AI 把邮件分成八类、打出重要程度（1~5 星）、找出截止日期。</p>
 
     <label class="lfld">
       <span>学号（可选，仅用于猜测邮箱地址，可改）</span>
@@ -98,6 +98,12 @@
   <section id="listview" hidden>
     <div class="ltool">
       <div class="ltitle"><b id="ltitle">全部</b><span id="lcount"></span></div>
+      <div class="lfilt">
+        <label>排序 <select id="l-sort"><option value="date">按日期</option><option value="importance">按重要程度</option></select></label>
+        <label>星级 <select id="l-stars">
+          <option value="">全部</option><option value="min5">仅 5 星</option><option value="min4">4 星以上</option>
+          <option value="min3">3 星以上</option><option value="max2">2 星以下（可忽略）</option></select></label>
+      </div>
       <div class="lacts" id="lacts" hidden>
         <label class="chk"><input type="checkbox" id="selall"> 全选</label>
         <button id="btn-trash" class="danger" disabled>移到已删除</button>
@@ -144,6 +150,15 @@
           <label>每 <input id="st-min" type="number" min="5" max="1440" step="5"> 分钟增量同步一次</label>
         </div>
         <div class="lsub">自动同步只扫描最近 7 天，不会标已读。默认关闭。</div>
+      </div>
+      <div class="ssec">
+        <div class="ssec-t">重要程度</div>
+        <div class="lsub" style="margin:0 0 8px">默认标准：5 星＝必须马上处理（考试、必修、截止在即），4 星＝这周要处理，3 星＝值得看一眼，2 星＝可看可不看，1 星＝完全不用看。</div>
+        <label class="lfld"><span>我的偏好（可选，自然语言，一条一行）</span>
+          <textarea id="st-prefs" rows="6" maxlength="3000" placeholder="例如：&#10;课程考试、必修活动、有报名截止的比赛最重要&#10;对大模型 / AI 方向的实习感兴趣&#10;社团招新、心理讲座不参加"></textarea></label>
+        <label class="lfld"><span>总是忽略的发件人（每行一个关键字，不分大小写；命中的邮件直接记 1 星，不会发给 Jev，省钱）</span>
+          <textarea id="st-ignore" rows="3" maxlength="4000" placeholder="例如：&#10;newsletter@&#10;某社团的名字"></textarea></label>
+        <div class="lsub">这两项只保存在本机配置里，只有「我的偏好」会随每封邮件一起发给 Jev。对之后新分类的邮件生效。</div>
       </div>
       <div class="ssec">
         <div class="ssec-t">隐私</div>

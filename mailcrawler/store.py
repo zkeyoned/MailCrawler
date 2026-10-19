@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS emails(
 CREATE TABLE IF NOT EXISTS triage(
     uid INTEGER PRIMARY KEY, cat TEXT, cat_conf REAL, action REAL,
     deadline TEXT, deadline_text TEXT, ddl_status TEXT, classified_at TEXT,
-    ddl_conf REAL, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0);
+    ddl_conf REAL, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+    importance REAL, imp_conf REAL, ignored INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date);
 """
@@ -29,9 +30,17 @@ def db():
     return c
 
 
+# 老版本建的库没有这几列：打开时补上（importance 为 NULL 的老记录会被当成「还没打重要程度」重新送去判断）
+MIGRATE_TRIAGE = (("importance", "REAL"), ("imp_conf", "REAL"), ("ignored", "INTEGER DEFAULT 0"))
+
+
 def init_db():
     with DB_LOCK, db() as c:
         c.executescript(SCHEMA)
+        have = {r[1] for r in c.execute("PRAGMA table_info(triage)")}
+        for col, typ in MIGRATE_TRIAGE:
+            if col not in have:
+                c.execute("ALTER TABLE triage ADD COLUMN %s %s" % (col, typ))
 
 
 def meta_add(key, n=1):
@@ -96,7 +105,15 @@ def get_email(uid):
 
 # ------------------------------------------------------------------ 分类结果
 CAT_ZH = {"coursework": "课程作业考试", "academic_admin": "教务行政", "campus_life": "校园生活与服务",
-          "event": "讲座活动比赛", "career": "实习招聘", "newsletter": "群发通知与订阅", "personal": "写给你本人"}
+          "event": "讲座活动比赛", "career": "实习招聘", "newsletter": "群发通知与订阅", "personal": "写给你本人",
+          "automated": "系统自动通知", "ignored": "已忽略（发件人规则）"}
+
+
+def stars_of(importance):
+    """重要程度（1~5 的小数）四舍五入成整数星级；没有则 None。"""
+    if importance is None:
+        return None
+    return max(1, min(5, int(importance + 0.5)))
 
 
 def triage_row(uid):
@@ -111,16 +128,20 @@ def triage_public(r):
     st = ddl.status_of(parse_dt(dl)) if dl else "none"
     return {"uid": r["uid"], "cat": r["cat"], "cat_zh": CAT_ZH.get(r["cat"], r["cat"]), "cat_conf": r["cat_conf"],
             "action": r["action"], "deadline": dl, "deadline_text": r.get("deadline_text") or "", "ddl_status": st,
-            "classified_at": r.get("classified_at")}
+            "classified_at": r.get("classified_at"), "importance": r.get("importance"), "stars": stars_of(r.get("importance")),
+            "imp_conf": r.get("imp_conf"), "ignored": bool(r.get("ignored"))}
 
 
-def save_triage(uid, cat, cat_conf, action, deadline, deadline_text, ddl_conf, usage):
+def save_triage(uid, cat, cat_conf, action, deadline, deadline_text, ddl_conf, usage,
+                importance=None, imp_conf=None, ignored=False):
     status = ddl.status_of(parse_dt(deadline)) if deadline else "none"
     with DB_LOCK, db() as c:
         c.execute("""INSERT OR REPLACE INTO triage(uid,cat,cat_conf,action,deadline,deadline_text,ddl_status,
-                     classified_at,ddl_conf,input_tokens,output_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                     classified_at,ddl_conf,input_tokens,output_tokens,importance,imp_conf,ignored)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (uid, cat, cat_conf, action, deadline, deadline_text, status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                   ddl_conf, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)))
+                   ddl_conf, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0),
+                   importance, imp_conf, 1 if ignored else 0))
 
 
 # ------------------------------------------------------------------ 查询
@@ -143,15 +164,30 @@ def view_where(view, q, now):
     return " AND ".join(w), p
 
 
-def list_emails(view, q, limit, offset):
+SORTS = {
+    "date": "e.date DESC, e.uid DESC",
+    # 重要程度从高到低；没打分的排最后；同分的新邮件在前
+    "importance": "(t.importance IS NULL), t.importance DESC, e.date DESC, e.uid DESC",
+}
+
+
+def list_emails(view, q, limit, offset, sort="date", min_stars=None, max_stars=None):
+    """sort: date | importance；min_stars / max_stars 按四舍五入后的星级筛选（含端点）。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     where, p = view_where(view, q, now)
+    if min_stars:
+        where += " AND t.importance >= ?"
+        p.append(int(min_stars) - 0.5)
+    if max_stars:
+        where += " AND t.importance < ?"
+        p.append(int(max_stars) + 0.5)
+    order = SORTS.get(sort, SORTS["date"])
     sql_from = "FROM emails e LEFT JOIN triage t ON e.uid=t.uid WHERE " + where
     with DB_LOCK, db() as c:
         total = c.execute("SELECT COUNT(*) " + sql_from, p).fetchone()[0]
         rows = c.execute("SELECT e.uid,e.date,e.sender,e.subject,substr(e.body,1,160) AS snippet,e.seen,"
-                         "t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.ddl_status "
-                         + sql_from + " ORDER BY e.date DESC, e.uid DESC LIMIT ? OFFSET ?", p + [limit, offset]).fetchall()
+                         "t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.ddl_status,t.importance,t.imp_conf,t.ignored "
+                         + sql_from + " ORDER BY " + order + " LIMIT ? OFFSET ?", p + [limit, offset]).fetchall()
     items = []
     for r in rows:
         d = dict(r)
@@ -162,17 +198,21 @@ def list_emails(view, q, limit, offset):
             d["classified"] = True
             d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
             d["ddl_status"] = ddl.status_of(parse_dt(d["deadline"])) if d["deadline"] else "none"
+        d["stars"] = stars_of(d["importance"])
+        d["ignored"] = bool(d["ignored"])
         items.append(d)
     return {"total": total, "items": items}
 
 
 def get_email_full(uid):
     with DB_LOCK, db() as c:
-        r = c.execute("SELECT e.*, t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text FROM emails e "
+        r = c.execute("SELECT e.*, t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.importance,t.imp_conf,t.ignored FROM emails e "
                       "LEFT JOIN triage t ON e.uid=t.uid WHERE e.uid=?", (uid,)).fetchone()
     if not r:
         return None
     d = dict(r)
+    d["stars"] = stars_of(d.get("importance"))
+    d["ignored"] = bool(d.get("ignored"))
     if d["cat"] is not None:
         d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
         d["ddl_status"] = ddl.status_of(parse_dt(d["deadline"])) if d["deadline"] else "none"
@@ -180,7 +220,8 @@ def get_email_full(uid):
 
 
 def next_unclassified(n, claims, fails, claim_ttl):
-    """取 n 封未分类邮件（含正文）；已被别的爬虫占用的、多次失败的不发。"""
+    """取 n 封未分类邮件（含正文）；已被别的爬虫占用的、多次失败的不发。
+    老版本分过类、但还没有重要程度的邮件也算未分类（会被重新送去判断一次，补上星级）。"""
     n = max(1, min(n, 60))
     t = __import__("time").time()
     for u in [u for u, exp in list(claims.items()) if exp < t]:
@@ -188,7 +229,7 @@ def next_unclassified(n, claims, fails, claim_ttl):
     busy = set(claims) | {u for u, k in fails.items() if k >= 2}
     with DB_LOCK, db() as c:
         rows = c.execute("SELECT e.uid,e.date,e.sender,e.subject,e.body FROM emails e "
-                         "LEFT JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 AND t.uid IS NULL "
+                         "LEFT JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 AND (t.uid IS NULL OR t.importance IS NULL) "
                          "ORDER BY e.date DESC, e.uid DESC LIMIT ?", (n + len(busy) + 5,)).fetchall()
     out = []
     for r in rows:
@@ -214,5 +255,9 @@ def stats(cats_keys):
         expired = c.execute("SELECT COUNT(*) FROM emails e JOIN triage t ON e.uid=t.uid WHERE e.trashed=0 "
                             "AND COALESCE(t.deadline,'')<>'' AND t.deadline<?", (now,)).fetchone()[0]
         toks = c.execute("SELECT COALESCE(SUM(input_tokens),0) FROM triage").fetchone()[0]
-    return {"total": total, "classified": classified, "unclassified": total - classified, "cats": cats,
+        stars = {k: 0 for k in range(1, 6)}
+        for r in c.execute("SELECT t.importance FROM emails e JOIN triage t ON e.uid=t.uid "
+                           "WHERE e.trashed=0 AND t.importance IS NOT NULL"):
+            stars[stars_of(r[0])] += 1
+    return {"total": total, "stars": stars, "classified": classified, "unclassified": total - classified, "cats": cats,
             "cat_zh": CAT_ZH, "todo": todo, "expired": expired, "input_tokens": toks}
