@@ -204,6 +204,44 @@ def list_emails(view, q, limit, offset, sort="date", min_stars=None, max_stars=N
     return {"total": total, "items": items}
 
 
+def has_clock_time(deadline):
+    """deadline 是否带具体时间。ddl.py 对只写了日期的候选统一补 23:59，这里当作「没具体时间」。"""
+    dt = parse_dt(deadline or "")
+    return bool(dt) and len(deadline) > 10 and not (dt.hour == 23 and dt.minute == 59)
+
+
+def calendar_items(frm, to, min_stars=None, hide_expired=False, limit=2000):
+    """日历用：截止/活动日期落在 [frm, to]（YYYY-MM-DD，含端点，to 为 None 表示不设上限）的邮件。
+    返回按时间排序的列表；ddl_status 按「现在」重新算。"""
+    now = datetime.now()
+    where = ["e.trashed=0", "COALESCE(t.deadline,'')<>''", "substr(t.deadline,1,10)>=?"]
+    p = [frm]
+    if to:
+        where.append("substr(t.deadline,1,10)<=?")
+        p.append(to)
+    sql = ("SELECT e.uid,e.date,e.sender,e.subject,t.cat,t.action,t.deadline,t.deadline_text,t.importance "
+           "FROM emails e JOIN triage t ON e.uid=t.uid WHERE " + " AND ".join(where) +
+           " ORDER BY t.deadline, e.uid LIMIT ?")
+    with DB_LOCK, db() as c:
+        rows = c.execute(sql, p + [max(1, min(int(limit), 5000))]).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        dt = parse_dt(d["deadline"])
+        if dt is None:
+            continue
+        d["ddl_status"] = ddl.status_of(dt, now)
+        d["stars"] = stars_of(d["importance"])
+        d["cat_zh"] = CAT_ZH.get(d["cat"], d["cat"])
+        d["has_time"] = has_clock_time(d["deadline"])
+        if hide_expired and d["ddl_status"] == "expired":
+            continue
+        if min_stars and (d["stars"] is None or d["stars"] < min_stars):
+            continue
+        out.append(d)
+    return out
+
+
 def get_email_full(uid):
     with DB_LOCK, db() as c:
         r = c.execute("SELECT e.*, t.cat,t.cat_conf,t.action,t.deadline,t.deadline_text,t.importance,t.imp_conf,t.ignored FROM emails e "

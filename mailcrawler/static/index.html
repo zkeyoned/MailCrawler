@@ -95,6 +95,35 @@
     <div id="stage"><canvas id="cv"></canvas></div>
   </section>
 
+  <section id="calview" hidden>
+    <div class="caltool">
+      <div class="calnav">
+        <button id="cal-prev" class="calbtn" title="上个月">‹ 上个月</button>
+        <button id="cal-today" class="calbtn">今天</button>
+        <button id="cal-next" class="calbtn" title="下个月">下个月 ›</button>
+        <b id="cal-title"></b>
+      </div>
+      <div class="calfilt">
+        <label class="chk"><input type="checkbox" id="cal-min3"> 只看 ≥3 星</label>
+        <label class="chk"><input type="checkbox" id="cal-hideexp"> 隐藏已过期</label>
+        <button id="cal-export" class="calbtn accent" title="导出未过期条目为 .ics，保存到「下载」文件夹">导出 .ics</button>
+      </div>
+    </div>
+    <div class="calbody">
+      <div class="calmain">
+        <div class="calweek"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+        <div id="calgrid" class="calgrid"></div>
+      </div>
+      <aside class="calside">
+        <div id="calday" class="calpanel" hidden></div>
+        <div class="calpanel">
+          <div class="calph"><b>接下来 14 天</b><span id="cal-upcount"></span></div>
+          <div id="calup"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
   <section id="listview" hidden>
     <div class="ltool">
       <div class="ltitle"><b id="ltitle">全部</b><span id="lcount"></span></div>

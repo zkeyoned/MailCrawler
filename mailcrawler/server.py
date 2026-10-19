@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import config, jev, mailbox, secrets, store
+from . import config, ics, jev, mailbox, secrets, store
 from .paths import log_path
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -109,6 +109,18 @@ def _star_arg(qs, name):
     return v if 1 <= v <= 5 else None
 
 
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _date_arg(v, name):
+    """YYYY-MM-DD（且是真实日期）；否则抛 ValueError。"""
+    v = (v or "").strip()
+    if not _DATE_RE.fullmatch(v):
+        raise ValueError("%s 应为 YYYY-MM-DD" % name)
+    datetime.strptime(v, "%Y-%m-%d")
+    return v
+
+
 # ------------------------------------------------------------------ HTTP
 class H(BaseHTTPRequestHandler):
     server_version = "MailCrawler/1.0"
@@ -198,6 +210,17 @@ class H(BaseHTTPRequestHandler):
                 lo = _star_arg(qs, "min")
                 hi = _star_arg(qs, "max")
                 return self.send_json(store.list_emails(view, q, limit, offset, sort=sort, min_stars=lo, max_stars=hi))
+            if path == "/api/calendar":
+                try:
+                    frm = _date_arg((qs.get("from") or [""])[0], "from")
+                    to = _date_arg((qs.get("to") or [""])[0], "to")
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                if to < frm or (datetime.strptime(to, "%Y-%m-%d") - datetime.strptime(frm, "%Y-%m-%d")).days > 400:
+                    return self.send_json({"error": "日期范围不对（to 不能早于 from，最多 400 天）"}, 400)
+                items = store.calendar_items(frm, to, min_stars=_star_arg(qs, "min"),
+                                             hide_expired=(qs.get("hide_expired") or ["0"])[0] == "1")
+                return self.send_json({"from": frm, "to": to, "total": len(items), "items": items})
             m = re.fullmatch(r"/api/email/(\d+)", path)
             if m:
                 e = store.get_email_full(int(m.group(1)))
@@ -244,6 +267,25 @@ class H(BaseHTTPRequestHandler):
                 if n:
                     store.meta_add("words_read", n)
                 return self.send_json({"words_read": store.meta_get("words_read")})
+            if path == "/api/calendar/ics":
+                # 导出「现在起、未过期」的条目（可带 min 星级、from 起始日期）；写到「下载」文件夹后返回路径
+                try:
+                    frm = _date_arg(body.get("from") or datetime.now().strftime("%Y-%m-%d"), "from")
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                try:
+                    lo = int(body.get("min") or 0)
+                except (TypeError, ValueError):
+                    lo = 0
+                items = store.calendar_items(frm, None, min_stars=lo if 1 <= lo <= 5 else None, hide_expired=True)
+                if not items:
+                    return self.send_json({"error": "当前筛选下没有未过期的条目可导出"}, 404)
+                try:
+                    full, name = ics.export_file(items)
+                except OSError as e:
+                    return self.send_json({"error": "写文件失败：%s" % e}, 500)
+                log_line("calendar exported: %s (%d)" % (name, len(items)))
+                return self.send_json({"path": full, "name": name, "count": len(items)})
             if path == "/api/trash":
                 uids = body.get("uids")
                 if not isinstance(uids, list) or not uids or len(uids) > 5000:

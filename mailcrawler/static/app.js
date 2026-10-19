@@ -515,6 +515,7 @@
     const views = $('#nav-views');
     views.replaceChildren(
       mk('crawl', '爬取中', null, '#5eead4'),
+      mk('calendar', '📅 日历', null, '#c4a6ff'),
       mk('all', '全部', st ? st.total : null, '#7aa2ff'),
       mk('todo', '待处理', st ? st.todo : null, '#f1c453'),
       mk('expired', '已过期 · 可删', st ? st.expired : null, '#b58a8e'));
@@ -580,10 +581,14 @@
     S.view = v;
     const crawl = v === 'crawl';
     document.body.classList.toggle('listmode', !crawl);
+    const cal = v === 'calendar';
     $('#crawlview').hidden = !crawl;
-    $('#listview').hidden = crawl;
+    $('#calview').hidden = !cal;
+    $('#listview').hidden = crawl || cal;
     renderSide();
-    if (crawl) {
+    if (cal) {
+      Cal.enter();
+    } else if (crawl) {
       requestAnimationFrame(layoutAll);
       refill();
     } else {
@@ -725,6 +730,186 @@
     }
     renderListHeader();
   }
+
+  // ------------------------------------------------------------ 日历视图
+  // 邮件文字一律 textContent；日期全部用本地时间的 YYYY-MM-DD 字符串比较，不经过 UTC。
+  const WEEK_ZH = ['日', '一', '二', '三', '四', '五', '六'];
+  const pad2 = n => (n < 10 ? '0' : '') + n;
+  const ymd = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  const parseYmd = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s); return new Date(+m[1], +m[2] - 1, +m[3]); };
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 存不了就算了 */ } }
+
+  const Cal = {
+    month: null,          // 当月 1 号（Date）
+    sel: '',              // 选中的日期 YYYY-MM-DD
+    items: [],            // 月历范围内全部条目（未筛选）
+    upcoming: [],         // 今天起 14 天（未筛选）
+    min3: lsGet('mc_cal_min3') === '1',
+    hideExp: lsGet('mc_cal_hideexp') === '1',
+    gridFrom: '', gridTo: '',
+    seq: 0,
+    timer: 0,
+
+    enter() {
+      if (!this.month) { const t = new Date(); this.month = new Date(t.getFullYear(), t.getMonth(), 1); }
+      $('#cal-min3').checked = this.min3;
+      $('#cal-hideexp').checked = this.hideExp;
+      this.load();
+      clearInterval(this.timer);
+      this.timer = setInterval(() => { if (S.view === 'calendar') this.load(); else clearInterval(this.timer); }, 20000);
+    },
+    range() {
+      const first = this.month;
+      const off = (first.getDay() + 6) % 7;                       // 周一开头
+      const start = new Date(first.getFullYear(), first.getMonth(), 1 - off);
+      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 41);   // 固定 6 周
+      return [start, end];
+    },
+    async load() {
+      const my = ++this.seq;
+      const [a, b] = this.range();
+      this.gridFrom = ymd(a); this.gridTo = ymd(b);
+      const t = new Date();
+      const up0 = ymd(t), up1 = ymd(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 13));
+      try {
+        const [g, u] = await Promise.all([
+          api('/api/calendar?from=' + this.gridFrom + '&to=' + this.gridTo),
+          api('/api/calendar?from=' + up0 + '&to=' + up1)]);
+        if (my !== this.seq) return;
+        this.items = g.items;
+        this.upcoming = u.items;
+      } catch (e) {
+        if (my === this.seq) toast('加载日历失败：' + e.message, true);
+        return;
+      }
+      this.render();
+    },
+    visible(m) {
+      if (this.hideExp && m.ddl_status === 'expired') return false;
+      if (this.min3 && !(m.stars >= 3)) return false;
+      return true;
+    },
+    timeText(m) { return m.has_time ? m.deadline.slice(11, 16) : '全天'; },
+    dots(n) {
+      if (!n) return null;
+      const d = el('span', 'dots s' + n, '●'.repeat(n));
+      d.title = n + ' 星 · ' + STAR_ZH[n];
+      return d;
+    },
+    chip(m) {
+      const c = el('div', 'chip s' + (m.stars || 0) + (m.ddl_status === 'expired' ? ' exp' : ''));
+      c.style.setProperty('--cc', CAT_COLOR[m.cat] || '#888');
+      if (m.has_time) c.append(el('span', 'ct2', m.deadline.slice(11, 16)));
+      c.append(el('span', 'cs', m.subject || '(无主题)'));
+      const d = this.dots(m.stars);
+      if (d) c.append(d);
+      c.title = (m.subject || '') + '\n' + fmtDdl(m.deadline) + ' · ' + (m.cat_zh || '') + (m.ddl_status === 'expired' ? ' · 已过期' : '');
+      c.addEventListener('click', ev => { ev.stopPropagation(); openDrawer(m.uid); });
+      return c;
+    },
+    row(m, withDate) {
+      const r = el('div', 'crow s' + (m.stars || 0) + (m.ddl_status === 'expired' ? ' exp' : ''));
+      const when = el('div', 'cwhen');
+      if (withDate) {
+        const d = parseYmd(m.deadline);
+        when.append(el('b', '', (d.getMonth() + 1) + '月' + d.getDate() + '日 周' + WEEK_ZH[d.getDay()]), document.createTextNode(this.timeText(m)));
+      } else {
+        when.append(el('b', '', this.timeText(m)));
+      }
+      const sub = el('div', 'csub', m.subject || '(无主题)');
+      sub.title = m.subject || '';
+      const meta = el('div', 'cmeta');
+      const pill = el('span', 'pill');
+      const dot = el('i'); dot.style.background = CAT_COLOR[m.cat] || '#888';
+      pill.append(dot, el('span', '', m.cat_zh || m.cat || ''));
+      meta.append(pill);
+      if (m.ddl_status === 'expired') meta.append(el('span', 'badge b-expired', '已过期'));
+      const se = starsEl(m.stars, m.importance);
+      if (se) meta.append(se);
+      r.append(when, sub, meta);
+      r.addEventListener('click', () => openDrawer(m.uid));
+      return r;
+    },
+    render() {
+      const [a] = this.range();
+      $('#cal-title').textContent = this.month.getFullYear() + '年' + (this.month.getMonth() + 1) + '月';
+      const byDay = {};
+      for (const m of this.items) if (this.visible(m)) (byDay[m.deadline.slice(0, 10)] = byDay[m.deadline.slice(0, 10)] || []).push(m);
+      const today = ymd(new Date());
+      const cells = [];
+      for (let i = 0; i < 42; i++) {
+        const d = new Date(a.getFullYear(), a.getMonth(), a.getDate() + i);
+        const key = ymd(d);
+        const list = byDay[key] || [];
+        const cell = el('div', 'cday' + (d.getMonth() !== this.month.getMonth() ? ' other' : '') + (key === today ? ' today' : '') + (key === this.sel ? ' sel' : ''));
+        const num = el('div', 'cnum');
+        num.append(el('span', '', d.getDate() === 1 ? (d.getMonth() + 1) + '月' + d.getDate() + '日' : String(d.getDate())));
+        if (list.length) num.append(el('span', 'cn', list.length + ' 项'));
+        cell.append(num);
+        for (const m of list.slice(0, 3)) cell.append(this.chip(m));
+        if (list.length > 3) cell.append(el('div', 'cmore', '+' + (list.length - 3)));
+        cell.addEventListener('click', () => { this.sel = (this.sel === key ? '' : key); this.render(); });
+        cells.push(cell);
+      }
+      $('#calgrid').replaceChildren(...cells);
+
+      // 选中日的全部条目
+      const dp = $('#calday');
+      if (this.sel) {
+        const list = byDay[this.sel] || [];
+        const d = parseYmd(this.sel);
+        dp.replaceChildren();
+        const h = el('div', 'calph');
+        h.append(el('b', '', (d.getMonth() + 1) + '月' + d.getDate() + '日 周' + WEEK_ZH[d.getDay()]), el('span', '', list.length + ' 项'));
+        dp.append(h);
+        if (!list.length) dp.append(el('div', 'cempty', '这天没有截止或活动'));
+        for (const m of list) dp.append(this.row(m, false));
+        dp.hidden = false;
+      } else {
+        dp.hidden = true;
+      }
+
+      // 接下来 14 天
+      const up = this.upcoming.filter(m => this.visible(m));
+      $('#cal-upcount').textContent = up.length + ' 项';
+      const box = $('#calup');
+      box.replaceChildren();
+      if (!up.length) box.append(el('div', 'cempty', '接下来两周没有截止或活动' + ((this.min3 || this.hideExp) ? '（当前有筛选）' : '')));
+      for (const m of up) box.append(this.row(m, true));
+    },
+    shift(n) {
+      this.month = new Date(this.month.getFullYear(), this.month.getMonth() + n, 1);
+      this.sel = '';
+      this.load();
+    },
+    goToday() {
+      const t = new Date();
+      this.month = new Date(t.getFullYear(), t.getMonth(), 1);
+      this.sel = ymd(t);
+      this.load();
+    },
+    async exportIcs() {
+      const b = $('#cal-export');
+      b.disabled = true;
+      try {
+        const r = await post('/api/calendar/ics', { min: this.min3 ? 3 : 0 });
+        toast('已导出 ' + r.count + ' 项到 下载/' + r.name + '，双击可加入系统日历');
+      } catch (e) {
+        toast('导出失败：' + e.message, true);
+      } finally {
+        b.disabled = false;
+      }
+    },
+    bind() {
+      $('#cal-prev').onclick = () => this.shift(-1);
+      $('#cal-next').onclick = () => this.shift(1);
+      $('#cal-today').onclick = () => this.goToday();
+      $('#cal-min3').addEventListener('change', e => { this.min3 = e.target.checked; lsSet('mc_cal_min3', this.min3 ? '1' : '0'); this.render(); });
+      $('#cal-hideexp').addEventListener('change', e => { this.hideExp = e.target.checked; lsSet('mc_cal_hideexp', this.hideExp ? '1' : '0'); this.render(); });
+      $('#cal-export').onclick = () => this.exportIcs();
+    }
+  };
 
   // ------------------------------------------------------------ 抽屉 / 弹窗
   async function openDrawer(uid) {
@@ -948,7 +1133,7 @@
       clearTimeout(qt);
       qt = setTimeout(() => {
         S.q = e.target.value.trim();
-        if (S.view === 'crawl') { if (!S.q) return; setView('all'); } else { L.reset(); loadList(true); }
+        if (S.view === 'crawl' || S.view === 'calendar') { if (!S.q) return; setView('all'); } else { L.reset(); loadList(true); }
       }, 300);
     });
     $('#sidebar').addEventListener('click', e => {
@@ -975,6 +1160,7 @@
       S.maxStars = v.startsWith('max') ? v.slice(3) : '';
       L.reset(); loadList(true);
     });
+    Cal.bind();
     $('#btn-trash').onclick = doTrash;
     $('#btn-settings').onclick = openSettings;
     $('#st-close').onclick = closeSettings;
