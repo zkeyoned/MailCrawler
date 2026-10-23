@@ -195,9 +195,15 @@ SYNC = {"syncing": False, "synced": 0, "to_sync": 0, "total_found": 0, "errors":
 SYNC_LOCK = threading.Lock()
 
 
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
 def _imap_date(d):
     """YYYY-MM-DD → 01-Jan-2026。"""
-    return datetime.strptime(d, "%Y-%m-%d").strftime("%d-%b-%Y")
+    dt = datetime.strptime(d, "%Y-%m-%d")
+    # 月份必须是固定的英文缩写：strftime 的 %b 会跟着系统语言走（可能变成「10月」），IMAP 服务器读不懂，
+    # 只会回「没有符合的邮件」而不报错
+    return "%02d-%s-%d" % (dt.day, _MONTHS[dt.month - 1], dt.year)
 
 
 def search_window(auto=False):
@@ -260,6 +266,11 @@ def sync_worker(auto=False):
                 raise RuntimeError("搜索失败：%s" % d)
             uids = sorted((int(x) for x in d[0].split()), reverse=True)  # 新的在前，前端能先拿到新邮件
             SYNC["total_found"] = len(uids)
+            try:
+                from .server import log_line
+                log_line("sync search %s -> %d 封" % (" ".join(args), len(uids)))
+            except Exception:
+                pass
         finally:
             try:
                 M.logout()
@@ -291,6 +302,11 @@ def sync_worker(auto=False):
         SYNC["phase"] = "完成"
     except Exception as e:
         SYNC["error"] = "%s: %s" % (type(e).__name__, e)
+        try:
+            from .server import log_line
+            log_line("sync error: %s" % SYNC["error"])
+        except Exception:
+            pass
         SYNC["errors"] += 1
         store.meta_add("errors")
         SYNC["phase"] = "出错"
