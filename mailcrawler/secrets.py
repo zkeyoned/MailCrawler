@@ -46,10 +46,19 @@ def save_account(email, password, key):
     config.save(email=email)
 
 
+def delete_secret(username):
+    with _lock:
+        try:
+            keyring.delete_password(SERVICE, username)
+        except Exception:
+            pass
+        _cache.pop(username, None)
+
+
 def clear_account():
     """退出登录：删掉钥匙串里的两项 + 清空配置。"""
     with _lock:
-        for username in ("imap", "jev"):
+        for username in ("imap", "jev", "qwen_key"):
             try:
                 keyring.delete_password(SERVICE, username)
             except Exception:

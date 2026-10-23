@@ -73,7 +73,8 @@ def setup_info():
             "email": cfg.get("email") if ready else "",
             "since": cfg.get("since") or "", "before": cfg.get("before") or "",
             "auto_sync": bool(cfg.get("auto_sync")), "auto_sync_minutes": int(cfg.get("auto_sync_minutes") or 30),
-            "preferences": cfg.get("preferences") or "", "ignore_senders": cfg.get("ignore_senders") or ""}
+            "preferences": cfg.get("preferences") or "", "ignore_senders": cfg.get("ignore_senders") or "",
+            "has_translate_key": bool(secrets.get_secret("qwen_key")) if ready else False}
     if ready:
         info["progress"] = progress()
         toks = 0
@@ -525,7 +526,18 @@ class H(BaseHTTPRequestHandler):
                 if len(v) > limit:
                     return self.send_json({"error": "太长了（最多 %d 个字符）" % limit}, 400)
                 kwargs[k] = v
-        return self.send_json(config.save(**kwargs))
+        if "translate_key" in body:
+            v = body.get("translate_key")
+            if not isinstance(v, str) or len(v) > 300:
+                return self.send_json({"error": "翻译 key 格式不对"}, 400)
+            v = v.strip()
+            if v:
+                secrets.set_secret("qwen_key", v)
+        if body.get("translate_key_clear"):
+            secrets.delete_secret("qwen_key")
+        res = config.save(**kwargs)
+        res["has_translate_key"] = bool(secrets.get_secret("qwen_key"))
+        return self.send_json(res)
 
 
 def create_server():

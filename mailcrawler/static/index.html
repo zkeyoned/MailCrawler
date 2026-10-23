@@ -213,8 +213,14 @@
         <div class="lsub">这两项只保存在本机配置里，只有「我的偏好」会随每封邮件一起发给 Jev。对之后新分类的邮件生效。</div>
       </div>
       <div class="ssec">
+        <div class="ssec-t">翻译成中文（可选）</div>
+        <label class="lfld"><span>阿里云百炼 API key（<a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener">在百炼控制台创建</a>，北京地域；不填就不能用邮件里的「翻译成中文」）</span>
+          <input id="st-tkey" type="password" autocomplete="off" placeholder="sk-…"></label>
+        <div class="srow"><span id="st-tkey-state" class="lsub"></span><button id="st-tkey-clear" class="ghost" hidden>删除已保存的翻译 key</button></div>
+      </div>
+      <div class="ssec">
         <div class="ssec-t">隐私</div>
-        <div class="lsub">邮件正文会发送到 TypeSafe（美国公司）的服务器做分类；密码与 API key 只存在本机系统钥匙串。</div>
+        <div class="lsub">邮件正文会发送到 TypeSafe（美国公司）的服务器做分类；点「翻译成中文」时，该封正文会发送到阿里云百炼。密码与 API key 只存在本机系统钥匙串。</div>
       </div>
       <div id="st-error" class="lerror" hidden></div>
       <div class="mbtns"><button id="st-save" class="primary btn-pad">保存</button></div>

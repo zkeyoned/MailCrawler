@@ -60,6 +60,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "MailCrawler",
         "CFBundleDisplayName": "邮件爬虫",
+        "CFBundleShortVersionString": "0.2.0",
+        "CFBundleVersion": "0.2.0",
         "NSHighResolutionCapable": True,
     },
 )

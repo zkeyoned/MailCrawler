@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""个人版：把邮件正文翻译成简体中文（阿里云百炼 Qwen，北京地域）。
+"""可选功能：把邮件正文翻译成简体中文（阿里云百炼 Qwen，北京地域）。
 
-隐私：正文会发送到阿里云百炼。key 存在钥匙串（MailCrawler / qwen_key），不写进配置文件。
+隐私：正文会发送到阿里云百炼。key 由用户在设置里填写，存在钥匙串（MailCrawler / qwen_key），不写进配置文件。
 译文缓存在数据目录的 translations.json，同一封只译一次。
 """
 import html
@@ -99,7 +99,7 @@ def translate(uid, subject, text):
         return hit, True
     key = secrets.get_secret("qwen_key")
     if not key:
-        raise RuntimeError("钥匙串里没有翻译用的 Qwen key（MailCrawler / qwen_key）")
+        raise RuntimeError("还没设置翻译 key：点右上角 ⚙ 设置 →「翻译（可选）」，填阿里云百炼的 API key")
     src = ("主题：" + subject + "\n\n" if subject else "") + (text or "").strip()
     truncated = len(src) > MAX_CHARS
     src = src[:MAX_CHARS]

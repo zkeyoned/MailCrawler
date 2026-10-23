@@ -176,7 +176,7 @@ def test_event_status():
     assert f(None, None) == "none"
     assert f(st, en, datetime(2026, 10, 19, 13, 59)) == "upcoming"
     assert f(st, en, datetime(2026, 10, 19, 14, 0)) == "ongoing"
-    assert f(st, en, datetime(2026, 10, 19, 15, 19)) == "ongoing"          # Key 的截图：15:1x 还在进行
+    assert f(st, en, datetime(2026, 10, 19, 15, 19)) == "ongoing"          # 实测：15:1x 还在进行
     assert f(st, en, datetime(2026, 10, 19, 15, 30)) == "ended"
     assert f(st, None, datetime(2026, 10, 19, 14, 59)) == "ongoing"        # 没有结束时间按 1 小时
     assert f(st, None, datetime(2026, 10, 19, 15, 0)) == "ended"

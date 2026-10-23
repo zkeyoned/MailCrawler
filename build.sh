@@ -11,8 +11,8 @@ fi
 
 .venv/bin/python scripts/make_icon.py
 .venv/bin/pyinstaller packaging/mailcrawler.spec --noconfirm
-# 个人版：用本机固定证书签名（钥匙串里的「MailCrawler Local Signing」），
-# 签名身份不变，钥匙串的「始终允许」重新打包后依然有效，不会每次都弹框
+# 可选：如果本机钥匙串里有名为「MailCrawler Local Signing」的代码签名证书，就用它签名。
+# 签名身份固定后，升级新版时钥匙串的「始终允许」依然有效，不会每次都弹框；没有就保持 PyInstaller 默认的临时签名
 if security find-identity -p codesigning | grep -q "MailCrawler Local Signing"; then
   codesign --force --deep --sign "MailCrawler Local Signing" dist/MailCrawler.app
 fi

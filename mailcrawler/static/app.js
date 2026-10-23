@@ -1678,6 +1678,17 @@
     $('#st-min').value = cfg.auto_sync_minutes || 30;
     $('#st-prefs').value = cfg.preferences || '';
     $('#st-ignore').value = cfg.ignore_senders || '';
+    $('#st-tkey').value = '';
+    $('#st-tkey-state').textContent = cfg.has_translate_key ? '已保存翻译 key（不显示内容；要换就在上面填新的）' : '还没设置翻译 key';
+    $('#st-tkey-clear').hidden = !cfg.has_translate_key;
+    $('#st-tkey-clear').onclick = async () => {
+      try {
+        const r = await post('/api/settings', { translate_key_clear: true });
+        S.setup = Object.assign(S.setup || {}, r, { logged_in: true });
+        openSettings();
+        toast('已删除翻译 key');
+      } catch (e) { toast(e.message, true); }
+    };
     $('#st-error').hidden = true;
     $('#settings-mask').hidden = false;
   }
@@ -1691,6 +1702,7 @@
       auto_sync: $('#st-auto').checked, auto_sync_minutes: parseInt($('#st-min').value, 10) || 30,
       preferences: $('#st-prefs').value, ignore_senders: $('#st-ignore').value
     };
+    if ($('#st-tkey').value.trim()) body.translate_key = $('#st-tkey').value.trim();
     try {
       const cfg = await post('/api/settings', body);
       S.setup = Object.assign(S.setup || {}, cfg, { logged_in: true });
