@@ -1401,6 +1401,20 @@
       const sub = el('span', '', fmtSize(a.size) + ' · ' + (a.content_type || ''));
       info.append(el('b', '', a.filename), sub);
       info.title = a.filename;
+      const openIt = async () => {
+        ob.disabled = true; ob.textContent = '打开中…';
+        try {
+          await post('/api/email/' + uid + '/attachment/' + a.index + '/open');
+          toast('已打开 ' + a.filename);
+        } catch (e) {
+          toast(e.message, true);
+        }
+        ob.disabled = false; ob.textContent = '打开';
+      };
+      const ob = el('button', 'primary', '打开');
+      ob.onclick = openIt;
+      info.classList.add('clickable');
+      info.onclick = openIt;
       const btn = el('button', '', '保存到下载');
       if (saved[a.index]) { sub.textContent = '已保存到 ' + saved[a.index]; row.classList.add('saved'); btn.textContent = '已保存 ✓'; btn.disabled = true; }
       btn.onclick = async () => {
@@ -1417,7 +1431,7 @@
           toast('保存失败：' + e.message, true);
         }
       };
-      row.append(el('span', 'ai', fileIcon(a)), info, btn);
+      row.append(el('span', 'ai', fileIcon(a)), info, ob, btn);
       wrap.append(row);
     }
     box.append(wrap);
@@ -1462,6 +1476,27 @@
     }
     renderAttachments(ctx.atts, uid, r.attachments || [], ctx.saved);
   }
+  // 个人版：一键翻译成中文（Qwen），译文显示在正文上面，可收起；同一封只译一次（服务端缓存）
+  function renderTranslate(box, uid, my) {
+    const b = el('button', '', '翻译成中文');
+    const bar = noteBar('看不懂英文？点右边，整封翻成中文显示在这里。', false, b);
+    box.replaceChildren(bar);
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = '翻译中…';
+      try {
+        const r = await post('/api/email/' + uid + '/translate');
+        if (my !== drawerSeq) return;
+        const t = el('div', 'dtrans');
+        t.append(el('div', 'dah', '中文译文' + (r.cached ? '（已缓存）' : '')), linkify(r.text || ''));
+        const hide = el('button', '', '收起译文');
+        hide.onclick = () => renderTranslate(box, uid, my);
+        box.replaceChildren(noteBar('下面是机器翻译，日期、金额、链接以英文原文为准。', false, hide), t);
+      } catch (e) {
+        b.disabled = false; b.textContent = '重试翻译';
+        toast(e.message, true);
+      }
+    };
+  }
   async function openDrawer(uid) {
     const my = ++drawerSeq;
     const dr = $('#drawer'), box = $('#dcontent');
@@ -1503,7 +1538,9 @@
       }
       const ctx = { add, note: el('div'), atts: el('div'), body: el('div'), metaDone: false, saved: {} };
       ctx.body.append(el('div', 'dbody', m.body || '（正文为空）'));       // 先给本地纯文本，原文取回来再替换
-      box.replaceChildren(el('div', 'dsubj', m.subject || '(无主题)'), meta, ctx.note, ctx.atts, ctx.body);
+      const tr = el('div');
+      box.replaceChildren(el('div', 'dsubj', m.subject || '(无主题)'), meta, tr, ctx.note, ctx.atts, ctx.body);
+      renderTranslate(tr, uid, my);
       loadFull(my, uid, false, ctx);
     } catch (e) {
       if (my === drawerSeq) box.replaceChildren(el('div', 'conf', '加载失败：' + e.message));

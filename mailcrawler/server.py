@@ -12,6 +12,7 @@ import mimetypes
 import re
 import socket
 import ssl
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -19,8 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import config, ics, jev, mailbox, mimeview, secrets, store, timetable
-from .paths import log_path
+from . import config, ics, jev, mailbox, mimeview, secrets, store, timetable, translate
+from .paths import data_dir, log_path
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -165,6 +166,37 @@ def save_attachment(uid, index):
         raise OSError("重名文件太多")
     except OSError as e:
         raise SaveError("保存失败：%s" % e)
+
+
+# 个人版：点附件直接打开。只放行「打开也不会执行代码」的类型；其余只能保存到下载。
+OPEN_OK_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".heic", ".webp", ".bmp", ".tif", ".tiff",
+               ".txt", ".csv", ".md", ".rtf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt",
+               ".pages", ".numbers", ".key", ".mp3", ".m4a", ".wav", ".mp4", ".mov", ".ics"}
+
+
+def open_attachment(uid, index):
+    """把附件写进缓存目录（打上「来自互联网」隔离标记）并用系统默认应用打开。返回 (路径, 文件名)。"""
+    raw = mailbox.fetch_raw(uid)
+    got = mimeview.get_attachment(raw, index)
+    if got is None:
+        raise KeyError(index)
+    name, payload = got
+    fname = mimeview.safe_filename(name)
+    ext = Path(fname).suffix.lower()
+    if ext not in OPEN_OK_EXT:
+        raise SaveError("「%s」这类文件不直接打开（可能含可执行内容），请先保存到下载再自己确认" % (ext or "无扩展名"))
+    d = data_dir() / "attachments" / str(uid)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / ("%d-%s" % (index, fname))
+    try:
+        if not p.exists() or p.stat().st_size != len(payload):
+            p.write_bytes(payload)
+        subprocess.run(["xattr", "-w", "com.apple.quarantine", "0081;%08x;MailCrawler;" % int(time.time()), str(p)],
+                       capture_output=True, timeout=10)
+        subprocess.run(["open", str(p)], check=True, capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise SaveError("打开失败：%s" % e)
+    return str(p), fname
 
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -378,6 +410,44 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json({"error": "写文件失败：%s" % e}, 500)
                 log_line("calendar exported: %s (%d)" % (name, len(items)))
                 return self.send_json({"path": full, "name": name, "count": len(items)})
+            m = re.fullmatch(r"/api/email/(\d+)/attachment/(\d+)/open", path)
+            if m:
+                uid, idx = int(m.group(1)), int(m.group(2))
+                if store.get_email(uid) is None:
+                    return self.send_json({"error": "not found"}, 404)
+                try:
+                    full, name = open_attachment(uid, idx)
+                except KeyError:
+                    return self.send_json({"error": "没有这个附件"}, 404)
+                except SaveError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                except Exception as e:
+                    return self.send_json({"error": friendly_fetch_error(e)}, 502)
+                log_line("attachment opened: uid=%d #%d %s" % (uid, idx, name))
+                return self.send_json({"path": full, "name": name})
+            m = re.fullmatch(r"/api/email/(\d+)/translate", path)
+            if m:
+                uid = int(m.group(1))
+                local = store.get_email(uid)
+                if local is None:
+                    return self.send_json({"error": "not found"}, 404)
+                hit = translate.cached(uid)
+                if hit:
+                    return self.send_json({"text": hit, "cached": True})
+                text = ""
+                try:
+                    p = mimeview.parse(mailbox.fetch_raw(uid))
+                    text = p.text if (p.text or "").strip() else translate.html_to_text(p.html)
+                except Exception:
+                    text = local["body"] or ""
+                if not text.strip():
+                    return self.send_json({"error": "这封邮件没有可翻译的正文"}, 400)
+                try:
+                    out, was_cached = translate.translate(uid, local.get("subject") or "", text)
+                except RuntimeError as e:
+                    return self.send_json({"error": str(e)}, 502)
+                log_line("translated: uid=%d (%d chars)" % (uid, len(text)))
+                return self.send_json({"text": out, "cached": was_cached})
             m = re.fullmatch(r"/api/email/(\d+)/attachment/(\d+)/save", path)
             if m:
                 uid, idx = int(m.group(1)), int(m.group(2))
