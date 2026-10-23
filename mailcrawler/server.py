@@ -443,7 +443,7 @@ class H(BaseHTTPRequestHandler):
                 if not text.strip():
                     return self.send_json({"error": "这封邮件没有可翻译的正文"}, 400)
                 try:
-                    out, was_cached = translate.translate(uid, local.get("subject") or "", text)
+                    out, was_cached = translate.translate(uid, local["subject"] or "", text)
                 except RuntimeError as e:
                     return self.send_json({"error": str(e)}, 502)
                 log_line("translated: uid=%d (%d chars)" % (uid, len(text)))
